@@ -1,0 +1,60 @@
+{
+    "name": "Books-A-Million",
+    "enabled": true,
+    "interval": 900,
+    "timeout": 30,
+    "retry_attempts": 5,
+    "search_radius": 250,
+    "target_zipcode": "30135",
+    "bypass_method": "cloudscraper",
+    "cookie_file": "data/booksamillion_cookies.json",
+    "product_db_file": "data/booksamillion_products.json",
+    "keywords": [
+        "exclusive",
+        "limited edition",
+        "signed",
+        "pokemon",
+        "special edition"
+    ],
+    "search_urls": [
+        "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date",
+        "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=2",
+        "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=3",
+        "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=4"
+    ],
+    "item_urls": [
+        "https://www.booksamillion.com/p/Pokemon-Trading-Card-Game/Pokemon-International/F820650412493",
+        "https://www.booksamillion.com/p/Pokemon-Poke-Ball-Tin/Pokemon-International/F820650413315",
+        "https://www.booksamillion.com/p/Pokemon-Trading-Card-Game/Pokemon-International/F820650859007"
+    ],
+    "database": {
+        "enabled": false,
+        "type": "sqlite",
+        "file": "data/stockchecker.db",
+        "host": "localhost",
+        "port": 5432,
+        "name": "stockchecker",
+        "user": "postgres",
+        "password": ""
+    },
+    "headers": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
+        "DNT": "1"
+    },
+    "webhook": {
+        "enabled": true,
+        "url": "",
+        "format": "discord",
+        "mentions": [],
+        "avatar_url": "https://www.booksamillion.com/favicon.ico",
+        "username": "Books-A-Million Stock Alert"
+    },
+    "debug": {
+        "verbose": false,
+        "save_html": false,
+        "log_requests": false,
+        "log_level": "INFO"
+    }
+}

@@ -1,0 +1,57 @@
+2025-05-01 12:40:24,034 - ProxyManager - INFO - Loaded 1014 proxies from proxies.txt
+2025-05-01 12:40:24,034 - Dispatcher - INFO - Discovered module: booksamillion
+2025-05-01 12:40:24,037 - Dispatcher - INFO - Loaded module: booksamillion
+2025-05-01 12:40:24,038 - Dispatcher - INFO - Running module: Booksamillion
+2025-05-01 12:40:24,038 - Dispatcher - INFO - Started module: booksamillion
+2025-05-01 12:40:24,038 - Booksamillion - INFO - Checking item URL: https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322
+2025-05-01 12:40:24,519 - Booksamillion - WARNING - Attempt 1 failed for https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322: 403 Client Error: Forbidden for url: https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322. Retrying...
+2025-05-01 12:40:26,655 - Booksamillion - WARNING - Attempt 2 failed for https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322: 403 Client Error: Forbidden for url: https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322. Retrying...
+2025-05-01 12:40:28,786 - Booksamillion - ERROR - All 3 attempts failed for https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322
+2025-05-01 12:40:28,786 - Booksamillion - INFO - Checking item URL: https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700
+2025-05-01 12:40:28,946 - Booksamillion - WARNING - Attempt 1 failed for https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700: 403 Client Error: Forbidden for url: https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700. Retrying...
+2025-05-01 12:40:31,081 - Booksamillion - WARNING - Attempt 2 failed for https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700: 403 Client Error: Forbidden for url: https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700. Retrying...
+2025-05-01 12:40:33,229 - Booksamillion - ERROR - All 3 attempts failed for https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700
+2025-05-01 12:40:33,230 - Booksamillion - INFO - Checking category URL: https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227
+2025-05-01 12:40:33,369 - Booksamillion - WARNING - Attempt 1 failed for https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227: 403 Client Error: Forbidden for url: https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227. Retrying...
+2025-05-01 12:40:35,503 - Booksamillion - WARNING - Attempt 2 failed for https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227: 403 Client Error: Forbidden for url: https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227. Retrying...
+2025-05-01 12:40:37,645 - Booksamillion - ERROR - All 3 attempts failed for https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227
+2025-05-01 12:40:37,646 - Dispatcher - INFO - Module Booksamillion completed successfully
+2025-05-01 12:42:37,687 - Dispatcher - INFO - Running module: Booksamillion
+2025-05-01 12:42:37,687 - Booksamillion - INFO - Checking item URL: https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322
+2025-05-01 12:42:37,851 - Booksamillion - WARNING - Attempt 1 failed for https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322: 403 Client Error: Forbidden for url: https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322. Retrying...
+2025-05-01 12:42:40,019 - Booksamillion - WARNING - Attempt 2 failed for https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322: 403 Client Error: Forbidden for url: https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322. Retrying...
+2025-05-01 12:42:42,180 - Booksamillion - ERROR - All 3 attempts failed for https://www.booksamillion.com/p/Dune/Frank-Herbert/9780593099322
+2025-05-01 12:42:42,180 - Booksamillion - INFO - Checking item URL: https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700
+2025-05-01 12:42:42,327 - Booksamillion - WARNING - Attempt 1 failed for https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700: 403 Client Error: Forbidden for url: https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700. Retrying...
+2025-05-01 12:42:44,479 - Booksamillion - WARNING - Attempt 2 failed for https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700: 403 Client Error: Forbidden for url: https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700. Retrying...
+2025-05-01 12:42:46,611 - Booksamillion - ERROR - All 3 attempts failed for https://www.booksamillion.com/p/Harry-Potter-Sorcerers-Stone-MinaLima/J-K-Rowling/9781338596700
+2025-05-01 12:42:46,612 - Booksamillion - INFO - Checking category URL: https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227
+2025-05-01 12:42:46,748 - Booksamillion - WARNING - Attempt 1 failed for https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227: 403 Client Error: Forbidden for url: https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227. Retrying...
+2025-05-01 12:42:48,900 - Booksamillion - WARNING - Attempt 2 failed for https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227: 403 Client Error: Forbidden for url: https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227. Retrying...
+2025-05-01 12:42:51,038 - Booksamillion - ERROR - All 3 attempts failed for https://www.booksamillion.com/search?category=books&filter=new_releases&id=8495756753227
+2025-05-01 12:42:51,038 - Dispatcher - INFO - Module Booksamillion completed successfully
+2025-05-01 17:59:13,798 - ProxyManager - INFO - Loaded 1014 proxies from proxies.txt
+2025-05-01 17:59:13,926 - Dispatcher - INFO - Discovered module: booksamillion
+2025-05-01 17:59:14,469 - Dispatcher - INFO - Loaded module: booksamillion
+2025-05-01 17:59:14,470 - Dispatcher - ERROR - Module booksamillion does not contain required class Booksamillion
+2025-05-01 18:13:49,385 - ProxyManager - INFO - Loaded 1014 proxies from proxies.txt
+2025-05-01 18:13:49,386 - Dispatcher - INFO - Discovered module: booksamillion
+2025-05-01 18:13:49,547 - Dispatcher - INFO - Loaded module: booksamillion
+2025-05-01 18:13:49,548 - BooksAMillion - INFO - Loaded module-specific configuration
+2025-05-01 18:13:49,548 - BooksAMillion - INFO - No valid cookies found, will generate new ones
+2025-05-01 18:13:49,564 - BooksAMillion - INFO - Created CloudScraper session
+2025-05-01 18:13:49,565 - Dispatcher - INFO - Running module: Booksamillion
+2025-05-01 18:13:49,565 - Dispatcher - INFO - Started module: booksamillion
+2025-05-01 18:13:49,565 - Dispatcher - ERROR - Error running module Booksamillion: Booksamillion.check_stock() missing 1 required positional argument: 'pid'
+2025-05-01 18:15:49,606 - Dispatcher - INFO - Running module: Booksamillion
+2025-05-01 18:15:49,606 - Dispatcher - ERROR - Error running module Booksamillion: Booksamillion.check_stock() missing 1 required positional argument: 'pid'
+2025-05-01 18:17:49,642 - Dispatcher - INFO - Running module: Booksamillion
+2025-05-01 18:17:49,642 - Dispatcher - ERROR - Error running module Booksamillion: Booksamillion.check_stock() missing 1 required positional argument: 'pid'
+2025-05-01 18:19:49,676 - Dispatcher - INFO - Running module: Booksamillion
+2025-05-01 18:19:49,677 - Dispatcher - ERROR - Error running module Booksamillion: Booksamillion.check_stock() missing 1 required positional argument: 'pid'
+2025-05-01 18:21:49,710 - Dispatcher - INFO - Running module: Booksamillion
+2025-05-01 18:21:49,710 - Dispatcher - ERROR - Error running module Booksamillion: Booksamillion.check_stock() missing 1 required positional argument: 'pid'
+2025-05-01 18:23:49,749 - Dispatcher - INFO - Running module: Booksamillion
+2025-05-01 18:23:49,750 - Dispatcher - ERROR - Error running module Booksamillion: Booksamillion.check_stock() missing 1 required positional argument: 'pid'
+2025-05-01 18:25:49,860 - Dispatcher - INFO - Running module: Booksamillion
+2025-05-01 18:25:49,860 - Dispatcher - ERROR - Error running module Booksamillion: Booksamillion.check_stock() missing 1 required positional argument: 'pid'
