@@ -16,37 +16,11 @@ import random
 import requests
 import urllib.parse
 
-# Optional imports for different Cloudflare bypass methods
-try:
-    import cloudscraper
-
-    CLOUDSCRAPER_AVAILABLE = True
-except ImportError:
-    CLOUDSCRAPER_AVAILABLE = False
-
-try:
-    import undetected_chromedriver as uc
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-
-    SELENIUM_AVAILABLE = True
-except ImportError:
-    SELENIUM_AVAILABLE = False
-
-try:
-    import tls_client
-
-    TLS_CLIENT_AVAILABLE = True
-except ImportError:
-    TLS_CLIENT_AVAILABLE = False
-
-# Import shared utility modules
-from utils.cloudflare_bypass import create_session
+from utils.cloudflare_bypass import CloudflareBypass
 from utils.headers_generator import generate_chrome_headers
 from utils.config_loader import load_module_config, load_module_targets, update_pid_list
 
-logger = logging.getLogger("BooksAMillion")
+logger = logging.getLogger("Booksamillion")
 
 
 class Booksamillion:
@@ -56,20 +30,20 @@ class Booksamillion:
 
     # Module metadata
     NAME = "Books-A-Million"
-    VERSION = "1.0.0"
+    VERSION = "1.1.0"
     INTERVAL = 300  # Default check interval in seconds
 
     def __init__(self):
         """Initialize the Books-A-Million module"""
         # Default configuration
         self.config = {
-            "timeout": 15,
-            "retry_attempts": 3,
+            "timeout": 30,
+            "retry_attempts": 5,
             "search_radius": 250,  # Miles
             "target_zipcode": "30135",  # Default zip
-            "bypass_method": "cloudscraper",  # Options: cloudscraper, selenium, tls_client
             "cookie_file": "data/booksamillion_cookies.json",
-            "product_db_file": "data/booksamillion_products.json"
+            "product_db_file": "data/booksamillion_products.json",
+            "max_backoff_time": 60  # Maximum backoff time in seconds
         }
 
         # Load module-specific config
@@ -93,46 +67,18 @@ class Booksamillion:
         if not data_dir.exists():
             data_dir.mkdir()
 
-        # Load or initialize cookies
-        self.cookies = self._load_cookies()
+        # Initialize CloudflareBypass handler
+        self.cf_bypass = CloudflareBypass(
+            cookie_file=self.config["cookie_file"],
+            base_url="https://www.booksamillion.com",
+            target_page="/"
+        )
+
+        # Create session from the CloudflareBypass
+        self.session = self.cf_bypass.create_session()
 
         # Load or initialize product database
         self.products = self._load_products()
-
-        # Create a session with the appropriate bypass method
-        self.session = self._create_session()
-
-    def _load_cookies(self) -> Dict[str, str]:
-        """Load cookies from file or return empty dict"""
-        cookie_file = Path(self.config["cookie_file"])
-        if cookie_file.exists():
-            try:
-                with open(cookie_file, 'r') as f:
-                    cookies = json.load(f)
-                    # Check if cookies are still valid (within 23 hours)
-                    if cookies.get('timestamp', 0) > time.time() - 82800:
-                        logger.info("Loaded valid cookies from file")
-                        return cookies.get('cookies', {})
-            except Exception as e:
-                logger.error(f"Error loading cookies: {str(e)}")
-
-        # If we get here, either no cookies or expired cookies
-        logger.info("No valid cookies found, will generate new ones")
-        return {}
-
-    def _save_cookies(self, cookies: Dict[str, str]):
-        """Save cookies to file with timestamp"""
-        cookie_file = Path(self.config["cookie_file"])
-        try:
-            cookie_data = {
-                'timestamp': time.time(),
-                'cookies': cookies
-            }
-            with open(cookie_file, 'w') as f:
-                json.dump(cookie_data, f, indent=2)
-            logger.info("Saved cookies to file")
-        except Exception as e:
-            logger.error(f"Error saving cookies: {str(e)}")
 
     def _load_products(self) -> Dict[str, Dict]:
         """Load product database from file or return empty dict"""
@@ -157,119 +103,15 @@ class Booksamillion:
         except Exception as e:
             logger.error(f"Error saving product database: {str(e)}")
 
-    def _create_session(self):
-        """Create a session with the appropriate bypass method"""
-        method = self.config.get("bypass_method", "cloudscraper")
+    def refresh_session(self):
+        """Refresh the session with new cookies and headers"""
+        # Get fresh cookies
+        self.cf_bypass.get_fresh_cookies()
 
-        if method == "cloudscraper" and CLOUDSCRAPER_AVAILABLE:
-            session = cloudscraper.create_scraper()
-            logger.info("Created CloudScraper session")
-        elif method == "tls_client" and TLS_CLIENT_AVAILABLE:
-            session = tls_client.Session(client_identifier="chrome112")
-            logger.info("Created TLS Client session")
-        else:
-            # Fallback to regular requests
-            session = requests.Session()
-            logger.info("Created regular requests session")
+        # Create a new session with the fresh cookies
+        self.session = self.cf_bypass.create_session()
 
-        # Update the session with our headers and cookies
-        headers = generate_chrome_headers()
-        session.headers.update(headers)
-
-        # Add any saved cookies
-        for name, value in self.cookies.items():
-            session.cookies.set(name, value)
-
-        return session
-
-    def get_fresh_cookies(self) -> bool:
-        """
-        Get fresh Cloudflare cookies using browser automation.
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        logger.info("Generating fresh Cloudflare cookies...")
-
-        # Method 1: Selenium with undetected_chromedriver (if available)
-        if SELENIUM_AVAILABLE:
-            try:
-                # Configure Chrome options
-                options = uc.ChromeOptions()
-                options.add_argument('--headless')
-                options.add_argument('--no-sandbox')
-                options.add_argument('--disable-gpu')
-
-                # Create driver
-                driver = uc.Chrome(options=options)
-                driver.get('https://www.booksamillion.com')
-
-                # Wait for page to load fully and Cloudflare to resolve
-                time.sleep(5)
-
-                # Extract cookies
-                cookies = {}
-                for cookie in driver.get_cookies():
-                    cookies[cookie['name']] = cookie['value']
-
-                # Close browser
-                driver.quit()
-
-                # Check if we got the Cloudflare cookies
-                if 'cf_clearance' in cookies:
-                    self.cookies = cookies
-                    self._save_cookies(cookies)
-                    logger.info("Successfully obtained Cloudflare cookies with Selenium")
-                    return True
-                else:
-                    logger.warning("Failed to get Cloudflare cookies with Selenium")
-            except Exception as e:
-                logger.error(f"Error using Selenium for cookies: {str(e)}")
-
-        # Method 2: CloudScraper
-        if CLOUDSCRAPER_AVAILABLE:
-            try:
-                scraper = cloudscraper.create_scraper()
-                response = scraper.get('https://www.booksamillion.com')
-
-                if response.status_code == 200:
-                    # Extract cookies from cloudscraper
-                    cookies = {}
-                    for cookie_name, cookie_value in scraper.cookies.get_dict().items():
-                        cookies[cookie_name] = cookie_value
-
-                    # Save cookies
-                    self.cookies = cookies
-                    self._save_cookies(cookies)
-                    logger.info("Successfully obtained cookies with CloudScraper")
-                    return True
-                else:
-                    logger.warning(f"Failed to get cookies with CloudScraper: {response.status_code}")
-            except Exception as e:
-                logger.error(f"Error using CloudScraper for cookies: {str(e)}")
-
-        # Method 3: TLS Client
-        if TLS_CLIENT_AVAILABLE:
-            try:
-                client = tls_client.Session(client_identifier="chrome112")
-                response = client.get('https://www.booksamillion.com')
-
-                if response.status_code == 200:
-                    # Extract cookies
-                    cookies = client.cookies.get_dict()
-
-                    # Save cookies
-                    self.cookies = cookies
-                    self._save_cookies(cookies)
-                    logger.info("Successfully obtained cookies with TLS Client")
-                    return True
-                else:
-                    logger.warning(f"Failed to get cookies with TLS Client: {response.status_code}")
-            except Exception as e:
-                logger.error(f"Error using TLS Client for cookies: {str(e)}")
-
-        logger.error("All cookie generation methods failed")
-        return False
+        logger.info("Refreshed session with new cookies and headers")
 
     def check_stock(self, pid: str = None, proxy: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
@@ -338,10 +180,6 @@ class Booksamillion:
         if proxy:
             self.session.proxies.update(proxy)
 
-        # Check if we need to refresh cookies first
-        if 'cf_clearance' not in self.cookies:
-            self.get_fresh_cookies()
-
         # Setup result template
         result = {
             "pid": pid,
@@ -368,40 +206,64 @@ class Booksamillion:
             f"&PageSize=25"
         )
 
-        # Attempt the request with retries
+        # Attempt the request with retries and exponential backoff
         response = None
-        for attempt in range(self.config["retry_attempts"]):
+        max_retries = self.config["retry_attempts"]
+        max_backoff = self.config["max_backoff_time"]
+
+        for attempt in range(max_retries):
             try:
-                response = self.session.get(
-                    bullseye_url,
-                    headers={
-                        "X-Requested-With": "XMLHttpRequest",
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "Referer": f"https://www.booksamillion.com/p/{pid}"
-                    },
-                    timeout=self.config["timeout"]
-                )
+                # Add request-specific headers
+                headers = {
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "Referer": f"https://www.booksamillion.com/p/{pid}"
+                }
 
-                # If we get a 403 or Cloudflare challenge, refresh cookies and retry
-                if response.status_code == 403 or "challenge" in response.text.lower():
-                    logger.warning("Got Cloudflare challenge, refreshing cookies...")
-                    self.get_fresh_cookies()
-                    continue
+                # Make the request with our enhanced bypass utility
+                try:
+                    response = self.cf_bypass.get(
+                        bullseye_url,
+                        headers=headers,
+                        timeout=self.config["timeout"],
+                        max_retries=2  # Internal retries for Cloudflare issues
+                    )
 
-                # If we get a successful response, break the retry loop
-                if response.status_code == 200:
-                    break
+                    # If we get a successful response, break the retry loop
+                    if response.status_code == 200:
+                        break
 
-                logger.warning(f"Attempt {attempt + 1} failed: HTTP {response.status_code}")
-                time.sleep(2 * (attempt + 1))  # Increasing backoff
+                except Exception as e:
+                    logger.error(f"Cloudflare bypass request error: {str(e)}")
+                    # If the Cloudflare bypass didn't handle the retry, we'll do it here
+                    pass
+
+                # If we get here, either the request failed or returned a non-200 status
+                logger.warning(
+                    f"Attempt {attempt + 1} failed: HTTP {response.status_code if response else 'No response'}")
+
+                # Calculate backoff time with jitter, capped at max_backoff
+                backoff_seconds = min(max_backoff, 1.5 * (2 ** attempt) * (0.8 + 0.4 * random.random()))
+                logger.info(f"Waiting {backoff_seconds:.2f} seconds before retry")
+                time.sleep(backoff_seconds)
+
+                # Refresh session for next attempt
+                self.refresh_session()
 
             except Exception as e:
                 logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
-                time.sleep(2 * (attempt + 1))
+
+                # Calculate backoff time with jitter, capped at max_backoff
+                backoff_seconds = min(max_backoff, 1.5 * (2 ** attempt) * (0.8 + 0.4 * random.random()))
+                logger.info(f"Waiting {backoff_seconds:.2f} seconds before retry")
+                time.sleep(backoff_seconds)
+
+                # Refresh session for next attempt
+                self.refresh_session()
 
         # Check if we got a valid response
         if not response or response.status_code != 200:
-            logger.error(f"Failed to check stock for {pid} after {self.config['retry_attempts']} attempts")
+            logger.error(f"Failed to check stock for {pid} after {max_retries} attempts")
             return result
 
         # Parse the JSON response
@@ -465,75 +327,49 @@ class Booksamillion:
         if proxy:
             self.session.proxies.update(proxy)
 
-        # Check if we need to refresh cookies first
-        if 'cf_clearance' not in self.cookies:
-            self.get_fresh_cookies()
-
         new_pids = []
 
         # Process each search URL
         for url in self.search_urls:
             logger.info(f"Scanning URL: {url}")
 
-            # Attempt the request with retries
-            response = None
-            for attempt in range(self.config["retry_attempts"]):
-                try:
-                    response = self.session.get(
-                        url,
-                        timeout=self.config["timeout"]
-                    )
-
-                    # If we get a 403 or Cloudflare challenge, refresh cookies and retry
-                    if response.status_code == 403 or "challenge" in response.text.lower():
-                        logger.warning("Got Cloudflare challenge, refreshing cookies...")
-                        self.get_fresh_cookies()
-                        continue
-
-                    # If we get a successful response, break the retry loop
-                    if response.status_code == 200:
-                        break
-
-                    logger.warning(f"Attempt {attempt + 1} failed: HTTP {response.status_code}")
-                    time.sleep(2 * (attempt + 1))  # Increasing backoff
-
-                except Exception as e:
-                    logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
-                    time.sleep(2 * (attempt + 1))
-
-            # Check if we got a valid response
-            if not response or response.status_code != 200:
-                logger.error(f"Failed to scan URL {url} after {self.config['retry_attempts']} attempts")
-                continue
-
-            # Parse the HTML to find product PIDs
+            # Use the Cloudflare bypass utility for the request
             try:
-                html = response.text
+                response = self.cf_bypass.get(
+                    url,
+                    timeout=self.config["timeout"],
+                    max_retries=3
+                )
 
-                # Extract PIDs using regex pattern matching
-                # Looking for patterns like: pid=F820650412493 or pid=9798400902550
-                pid_pattern = r'pid=([A-Za-z0-9]+)'
-                pids = re.findall(pid_pattern, html)
+                # Parse the HTML to find product PIDs
+                if response.status_code == 200:
+                    html = response.text
 
-                # Clean up the PIDs (remove duplicates)
-                pids = list(set(pids))
+                    # Extract PIDs using regex pattern matching
+                    # Looking for patterns like: pid=F820650412493 or pid=9798400902550
+                    pid_pattern = r'pid=([A-Za-z0-9]+)'
+                    pids = re.findall(pid_pattern, html)
 
-                logger.info(f"Found {len(pids)} PIDs on page")
+                    # Clean up the PIDs (remove duplicates)
+                    pids = list(set(pids))
 
-                # Check which PIDs are new
-                for pid in pids:
-                    if pid not in self.products and pid not in self.pids:
-                        logger.info(f"Found new PID: {pid}")
-                        new_pids.append(pid)
+                    logger.info(f"Found {len(pids)} PIDs on page")
 
-                        # Add to the PIDs list
-                        self.pids.append(pid)
+                    # Check which PIDs are new
+                    for pid in pids:
+                        if pid not in self.products and pid not in self.pids:
+                            logger.info(f"Found new PID: {pid}")
+                            new_pids.append(pid)
 
-                # Delay between requests to avoid rate limiting
-                time.sleep(random.uniform(1.0, 3.0))
-
+                            # Add to the PIDs list
+                            self.pids.append(pid)
+                else:
+                    logger.warning(f"Failed to scan URL {url}: HTTP {response.status_code}")
             except Exception as e:
-                logger.error(f"Error parsing search results from {url}: {str(e)}")
+                logger.error(f"Error scanning URL {url}: {str(e)}")
+
+            # Delay between requests to avoid rate limiting
+            time.sleep(random.uniform(2.0, 4.0))
 
         # If new PIDs were found, update the PID list in the configuration
         if new_pids:
@@ -683,7 +519,7 @@ class Booksamillion:
                         )
 
                 # Delay between checks to avoid rate limiting
-                time.sleep(random.uniform(1.0, 3.0))
+                time.sleep(random.uniform(2.0, 4.0))
 
             logger.info("Main monitor loop completed successfully")
 
@@ -699,22 +535,20 @@ if __name__ == "__main__":
     )
 
     # Create and test the module
-    bam = BooksAMillion()
+    bam = Booksamillion()
 
     # Test cookie generation
-    bam.get_fresh_cookies()
+    bam.refresh_session()
 
     # Scan for items
     new_pids = bam.scan_new_items()
     print(f"Found {len(new_pids)} new PIDs")
 
     # Test stock check with a known PID
-    test_pid = "9798400902550"  # Solo Leveling Vol. 11
+    test_pid = "F820650412493"  # Pokemon card
     if new_pids:
         test_pid = new_pids[0]
 
     result = bam.check_stock(test_pid)
     print(f"Stock check result for {test_pid}:")
     print(json.dumps(result, indent=2))
-
-    Booksamillion = BooksAMillion
