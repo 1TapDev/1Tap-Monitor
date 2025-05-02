@@ -15,10 +15,13 @@ logger = logging.getLogger("ConfigLoader")
 
 def ensure_config_dirs():
     """Create configuration directories if they don't exist"""
+    # Get the project root directory (parent of the current directory)
+    root_dir = Path(__file__).resolve().parent.parent
+    
     dirs = [
-        Path("../config"),
-        Path("../config/modules"),
-        Path("../config/targets")
+        root_dir / "config",
+        root_dir / "config/modules",
+        root_dir / "config/targets"
     ]
 
     for directory in dirs:
@@ -37,8 +40,11 @@ def load_module_config(module_name: str) -> Dict[str, Any]:
     """
     ensure_config_dirs()
 
+    # Get the project root directory
+    root_dir = Path(__file__).resolve().parent.parent
+    
     # Define path to module config
-    config_path = Path(f"../config/modules/{module_name}.json")
+    config_path = root_dir / f"config/modules/{module_name}.json"
 
     # Check if config file exists
     if not config_path.exists():
@@ -80,8 +86,11 @@ def load_module_targets(module_name: str) -> Dict[str, Any]:
         "brands": []
     }
 
+    # Get the project root directory
+    root_dir = Path(__file__).resolve().parent.parent
+    
     # Define paths
-    base_path = Path("../config/targets") / module_name
+    base_path = root_dir / "config/targets" / module_name
 
     # Ensure module targets directory exists
     base_path.mkdir(exist_ok=True)
@@ -142,8 +151,11 @@ def save_module_targets(module_name: str, target_type: str, data: Dict[str, Any]
     """
     ensure_config_dirs()
 
+    # Get the project root directory
+    root_dir = Path(__file__).resolve().parent.parent
+    
     # Define paths
-    base_path = Path("../config/targets") / module_name
+    base_path = root_dir / "config/targets" / module_name
 
     # Ensure module targets directory exists
     base_path.mkdir(exist_ok=True)
@@ -208,8 +220,11 @@ def load_global_config() -> Dict[str, Any]:
     """
     ensure_config_dirs()
 
+    # Get the project root directory
+    root_dir = Path(__file__).resolve().parent.parent
+    
     # Define path to global config
-    config_path = Path("../config/global.json")
+    config_path = root_dir / "config/global.json"
 
     # Check if config file exists and create default if it doesn't
     if not config_path.exists():

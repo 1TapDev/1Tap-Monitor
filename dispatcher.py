@@ -52,27 +52,38 @@ class ModuleThread(threading.Thread):
 
                 proxy = None
                 if self.proxy_manager:
-                    proxy = self.proxy_manager.get_proxy()
+                    try:
+                        proxy = self.proxy_manager.get_proxy()
+                    except Exception as proxy_err:
+                        logger.error(f"Error getting proxy for {self.module.__class__.__name__}: {str(proxy_err)}")
+                        # Continue without proxy if there's an error
 
-                # Run the module and get results
-                results = self.module.check_stock(proxy=proxy)
+                try:
+                    # Run the module and get results
+                    results = self.module.check_stock(proxy=proxy)
 
-                # Check if any items are in stock
-                if results and any(item.get('in_stock', False) for item in results):
-                    # Send notifications for in-stock items
-                    for item in results:
-                        if item.get('in_stock', False):
-                            self.notifier.send_alert(
-                                title=f"In Stock: {item.get('name', 'Unknown Item')}",
-                                description=f"Found at {self.module.NAME}",
-                                url=item.get('url', ''),
-                                image=item.get('image', ''),
-                                store=self.module.NAME
-                            )
+                    # Check if any items are in stock
+                    if results and any(item.get('in_stock', False) for item in results):
+                        # Send notifications for in-stock items
+                        for item in results:
+                            if item.get('in_stock', False):
+                                try:
+                                    self.notifier.send_alert(
+                                        title=f"In Stock: {item.get('title', 'Unknown Item')}",
+                                        description=f"Found at {self.module.NAME}",
+                                        url=item.get('url', ''),
+                                        image=item.get('image', ''),
+                                        store=self.module.NAME
+                                    )
+                                except Exception as notify_err:
+                                    logger.error(f"Error sending notification for {item.get('title', 'Unknown Item')}: {str(notify_err)}")
 
-                logger.info(f"Module {self.module.__class__.__name__} completed successfully")
+                    logger.info(f"Module {self.module.__class__.__name__} completed successfully")
+                except Exception as module_err:
+                    logger.error(f"Error in module {self.module.__class__.__name__} check_stock method: {str(module_err)}")
+                    # Continue to next run despite module error
             except Exception as e:
-                logger.error(f"Error running module {self.module.__class__.__name__}: {str(e)}")
+                logger.error(f"Unhandled error running module {self.module.__class__.__name__}: {str(e)}")
 
             # Calculate next run time
             self.next_run = datetime.now() + timedelta(seconds=self.interval)
@@ -187,7 +198,7 @@ class ModuleDispatcher:
             logger.error(f"Error loading module {module_name}: {str(e)}")
             return False
 
-    def load_module_targets(module_name: str) -> Dict[str, Any]:
+    def load_module_targets(self, module_name: str) -> Dict[str, Any]:
         """
         Load all target configurations for a specific module
 
@@ -203,8 +214,11 @@ class ModuleDispatcher:
             "keywords": []
         }
 
+        # Get the project root directory
+        root_dir = Path(__file__).resolve().parent
+        
         # Define paths
-        base_path = Path("config/targets") / module_name
+        base_path = root_dir / "config/targets" / module_name
 
         # Load URLs if available
         url_file = base_path / "urls.json"
