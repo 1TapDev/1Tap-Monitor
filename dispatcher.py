@@ -187,6 +187,59 @@ class ModuleDispatcher:
             logger.error(f"Error loading module {module_name}: {str(e)}")
             return False
 
+    def load_module_targets(module_name: str) -> Dict[str, Any]:
+        """
+        Load all target configurations for a specific module
+
+        Args:
+            module_name: Name of the module
+
+        Returns:
+            Dict with all target configurations
+        """
+        targets = {
+            "urls": [],
+            "pids": [],
+            "keywords": []
+        }
+
+        # Define paths
+        base_path = Path("config/targets") / module_name
+
+        # Load URLs if available
+        url_file = base_path / "urls.json"
+        if url_file.exists():
+            try:
+                with open(url_file, "r") as f:
+                    url_data = json.load(f)
+                    targets["urls"] = url_data.get("urls", [])
+                    targets["search_urls"] = url_data.get("search_urls", [])
+                    targets["item_urls"] = url_data.get("item_urls", [])
+            except Exception as e:
+                logger.error(f"Error loading URLs for {module_name}: {str(e)}")
+
+        # Load PIDs if available
+        pid_file = base_path / "pid_list.json"
+        if pid_file.exists():
+            try:
+                with open(pid_file, "r") as f:
+                    pid_data = json.load(f)
+                    targets["pids"] = pid_data.get("pids", [])
+            except Exception as e:
+                logger.error(f"Error loading PIDs for {module_name}: {str(e)}")
+
+        # Load keywords if available
+        keyword_file = base_path / "keywords.json"
+        if keyword_file.exists():
+            try:
+                with open(keyword_file, "r") as f:
+                    keyword_data = json.load(f)
+                    targets["keywords"] = keyword_data.get("keywords", [])
+            except Exception as e:
+                logger.error(f"Error loading keywords for {module_name}: {str(e)}")
+
+        return targets
+
     def start_module(self, module_name: str) -> str:
         """
         Start a module by name

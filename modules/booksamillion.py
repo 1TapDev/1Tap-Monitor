@@ -19,6 +19,7 @@ import urllib.parse
 # Optional imports for different Cloudflare bypass methods
 try:
     import cloudscraper
+
     CLOUDSCRAPER_AVAILABLE = True
 except ImportError:
     CLOUDSCRAPER_AVAILABLE = False
@@ -28,12 +29,14 @@ try:
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+
     SELENIUM_AVAILABLE = True
 except ImportError:
     SELENIUM_AVAILABLE = False
 
 try:
     import tls_client
+
     TLS_CLIENT_AVAILABLE = True
 except ImportError:
     TLS_CLIENT_AVAILABLE = False
@@ -41,10 +44,12 @@ except ImportError:
 # Import shared utility modules
 from utils.cloudflare_bypass import create_session
 from utils.headers_generator import generate_chrome_headers
+from utils.config_loader import load_module_config, load_module_targets, update_pid_list
 
 logger = logging.getLogger("BooksAMillion")
 
-class Booksamillion:
+
+class BooksAMillion:
     """
     Module for checking stock on booksamillion.com
     """
@@ -56,25 +61,37 @@ class Booksamillion:
 
     def __init__(self):
         """Initialize the Books-A-Million module"""
+        # Default configuration
         self.config = {
-            "keywords": ["exclusive", "limited edition", "signed", "pokemon"],
-            "search_urls": [
-                "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date",
-                "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=2",
-                "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=3",
-                "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=4"
-            ],
             "timeout": 15,
             "retry_attempts": 3,
             "search_radius": 250,  # Miles
             "target_zipcode": "30135",  # Default zip
             "bypass_method": "cloudscraper",  # Options: cloudscraper, selenium, tls_client
-            "cookie_file": "booksamillion_cookies.json",
-            "product_db_file": "booksamillion_products.json"
+            "cookie_file": "data/booksamillion_cookies.json",
+            "product_db_file": "data/booksamillion_products.json"
         }
 
-        # Load module-specific config if available
-        self._load_module_config()
+        # Load module-specific config
+        module_config = load_module_config("booksamillion")
+        if module_config:
+            self.config.update(module_config)
+            logger.info("Loaded module-specific configuration")
+
+        # Load target configurations (URLs, PIDs, keywords)
+        targets = load_module_targets("booksamillion")
+        self.search_urls = targets.get("search_urls", [])
+        self.item_urls = targets.get("item_urls", [])
+        self.pids = targets.get("pids", [])
+        self.keywords = targets.get("keywords", ["exclusive", "limited edition", "signed", "pokemon"])
+
+        logger.info(f"Loaded {len(self.search_urls)} search URLs, {len(self.item_urls)} item URLs, "
+                    f"{len(self.pids)} PIDs, and {len(self.keywords)} keywords")
+
+        # Ensure data directory exists
+        data_dir = Path("data")
+        if not data_dir.exists():
+            data_dir.mkdir()
 
         # Load or initialize cookies
         self.cookies = self._load_cookies()
@@ -84,18 +101,6 @@ class Booksamillion:
 
         # Create a session with the appropriate bypass method
         self.session = self._create_session()
-
-    def _load_module_config(self):
-        """Load module-specific configuration if available"""
-        module_config_file = Path('config_booksamillion.json')
-        if module_config_file.exists():
-            try:
-                with open(module_config_file, 'r') as f:
-                    module_config = json.load(f)
-                    self.config.update(module_config)
-                    logger.info("Loaded module-specific configuration")
-            except Exception as e:
-                logger.error(f"Error loading module config: {str(e)}")
 
     def _load_cookies(self) -> Dict[str, str]:
         """Load cookies from file or return empty dict"""
@@ -266,9 +271,59 @@ class Booksamillion:
         logger.error("All cookie generation methods failed")
         return False
 
-    def check_stock(self, pid: str, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def check_stock(self, pid: str = None, proxy: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
-        Check stock availability for a specific PID
+        Check stock availability for a specific PID or all configured PIDs
+
+        Args:
+            pid: Product ID to check (optional)
+            proxy: Optional proxy configuration
+
+        Returns:
+            List of dictionaries with product and stock information
+        """
+        results = []
+
+        # If no PID is specified, check all configured PIDs
+        if pid is None:
+            logger.info("No PID specified, checking configured PIDs")
+
+            # Check PIDs from configuration
+            pids_to_check = self.pids
+
+            # If no configured PIDs, extract from item URLs
+            if not pids_to_check and self.item_urls:
+                for url in self.item_urls:
+                    # Extract PID from URL
+                    pid_match = re.search(r'/([A-Za-z0-9]+)$', url)
+                    if pid_match:
+                        pids_to_check.append(pid_match.group(1))
+
+            # If still no PIDs, check some from the product database
+            if not pids_to_check and self.products:
+                pids_to_check = list(self.products.keys())[:10]  # Limit to 10
+
+            # Check each PID
+            if pids_to_check:
+                logger.info(f"Checking {len(pids_to_check)} PIDs")
+                for pid_to_check in pids_to_check:
+                    result = self._check_single_stock(pid_to_check, proxy)
+                    results.append(result)
+                    # Small delay between checks
+                    time.sleep(random.uniform(1.0, 2.0))
+            else:
+                logger.warning("No PIDs configured to check")
+
+        else:
+            # Check the specified PID
+            result = self._check_single_stock(pid, proxy)
+            results.append(result)
+
+        return results
+
+    def _check_single_stock(self, pid: str, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """
+        Internal method to check stock for a single PID
 
         Args:
             pid: Product ID to check
@@ -337,11 +392,11 @@ class Booksamillion:
                 if response.status_code == 200:
                     break
 
-                logger.warning(f"Attempt {attempt+1} failed: HTTP {response.status_code}")
+                logger.warning(f"Attempt {attempt + 1} failed: HTTP {response.status_code}")
                 time.sleep(2 * (attempt + 1))  # Increasing backoff
 
             except Exception as e:
-                logger.error(f"Request error on attempt {attempt+1}: {str(e)}")
+                logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
                 time.sleep(2 * (attempt + 1))
 
         # Check if we got a valid response
@@ -417,7 +472,7 @@ class Booksamillion:
         new_pids = []
 
         # Process each search URL
-        for url in self.config["search_urls"]:
+        for url in self.search_urls:
             logger.info(f"Scanning URL: {url}")
 
             # Attempt the request with retries
@@ -439,11 +494,11 @@ class Booksamillion:
                     if response.status_code == 200:
                         break
 
-                    logger.warning(f"Attempt {attempt+1} failed: HTTP {response.status_code}")
+                    logger.warning(f"Attempt {attempt + 1} failed: HTTP {response.status_code}")
                     time.sleep(2 * (attempt + 1))  # Increasing backoff
 
                 except Exception as e:
-                    logger.error(f"Request error on attempt {attempt+1}: {str(e)}")
+                    logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
                     time.sleep(2 * (attempt + 1))
 
             # Check if we got a valid response
@@ -467,15 +522,26 @@ class Booksamillion:
 
                 # Check which PIDs are new
                 for pid in pids:
-                    if pid not in self.products:
+                    if pid not in self.products and pid not in self.pids:
                         logger.info(f"Found new PID: {pid}")
                         new_pids.append(pid)
+
+                        # Add to the PIDs list
+                        self.pids.append(pid)
 
                 # Delay between requests to avoid rate limiting
                 time.sleep(random.uniform(1.0, 3.0))
 
             except Exception as e:
                 logger.error(f"Error parsing search results from {url}: {str(e)}")
+
+        # If new PIDs were found, update the PID list in the configuration
+        if new_pids:
+            try:
+                update_pid_list("booksamillion", new_pids)
+                logger.info(f"Updated PID list with {len(new_pids)} new PIDs")
+            except Exception as e:
+                logger.error(f"Error updating PID list: {str(e)}")
 
         logger.info(f"Scan complete. Found {len(new_pids)} new PIDs")
         return new_pids
@@ -559,10 +625,10 @@ class Booksamillion:
                     proxy = proxy_manager.get_proxy()
 
                 # Check stock for the new PID
-                result = self.check_stock(pid=pid, proxy=proxy)
+                result = self._check_single_stock(pid=pid, proxy=proxy)
 
                 # Send notification for new product
-                if notifier:
+                if notifier and result:
                     notifier.send_alert(
                         title=f"New Product: {result['title']}",
                         description=f"Found new product on Books-A-Million: {result['title']}\nPrice: ${result['price']}\nStatus: {'IN STOCK' if result['in_stock'] else 'OUT OF STOCK'}",
@@ -586,7 +652,7 @@ class Booksamillion:
                 old_status = self.products[pid]["in_stock"]
 
                 # Check stock for the product
-                result = self.check_stock(pid=pid, proxy=proxy)
+                result = self._check_single_stock(pid=pid, proxy=proxy)
 
                 # If stock status changed, send notification
                 if old_status != result["in_stock"] and notifier:
@@ -623,6 +689,7 @@ class Booksamillion:
 
         except Exception as e:
             logger.error(f"Error in main monitor loop: {str(e)}")
+
 
 if __name__ == "__main__":
     # Configure logging for standalone testing

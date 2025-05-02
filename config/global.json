@@ -1,0 +1,27 @@
+{
+  "discord_webhook": "https://discord.com/api/webhooks/1367540658767663274/bd5oxBHoOLun7w08zi_rQ4bkDk1ZZtocRnrU_rTmztwE2t4ilnBMs3bn3ViNkn5UTKfq",
+  "check_interval": 60,
+  "use_proxies": true,
+  "gui_enabled": true,
+  "debug": {
+    "verbose": false,
+    "log_level": "INFO",
+    "save_html": false,
+    "log_requests": false
+  },
+  "proxy_settings": {
+    "rotation_method": "sequential",
+    "retry_failed_after": 600,
+    "max_failures": 3
+  },
+  "modules": {
+    "booksamillion": {
+      "enabled": true,
+      "interval": 120
+    },
+    "popshelf": {
+      "enabled": false,
+      "interval": 300
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "search_urls": [
+    "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date",
+    "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=2",
+    "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=3",
+    "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=4"
+  ],
+  "item_urls": [
+    "https://www.booksamillion.com/p/Pokemon-Trading-Card-Game/Pokemon-International/F820650412493",
+    "https://www.booksamillion.com/p/Pokemon-Poke-Ball-Tin/Pokemon-International/F820650413315",
+    "https://www.booksamillion.com/p/Pokemon-Trading-Card-Game/Pokemon-International/F820650859007"
+  ]
+}
