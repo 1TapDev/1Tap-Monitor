@@ -237,7 +237,7 @@ CREATE OR REPLACE FUNCTION add_stock_check_task(
     p_pid VARCHAR(50),
     p_module VARCHAR(100),
     p_priority INT DEFAULT 5
-) RETURNS INT AS $
+) RETURNS INT AS $$
 DECLARE
     task_id INT;
 BEGIN
@@ -252,17 +252,17 @@ BEGIN
         p_priority,
         jsonb_build_object('pid', p_pid)
     ) RETURNING id INTO task_id;
-    
+
     RETURN task_id;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 -- Function to add a task to scan for new products
 CREATE OR REPLACE FUNCTION add_scan_task(
     p_module VARCHAR(100),
     p_url TEXT DEFAULT NULL,
     p_priority INT DEFAULT 3
-) RETURNS INT AS $
+) RETURNS INT AS $$
 DECLARE
     task_id INT;
     task_data JSONB;
@@ -272,7 +272,7 @@ BEGIN
     ELSE
         task_data := jsonb_build_object('url', p_url);
     END IF;
-    
+
     INSERT INTO tasks (
         task_type,
         module,
@@ -284,10 +284,10 @@ BEGIN
         p_priority,
         task_data
     ) RETURNING id INTO task_id;
-    
+
     RETURN task_id;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 -- Function to log stock events and trigger notifications
 CREATE OR REPLACE FUNCTION log_stock_event(
@@ -295,7 +295,7 @@ CREATE OR REPLACE FUNCTION log_stock_event(
     p_alert_type VARCHAR(50),
     p_message TEXT,
     p_data JSONB DEFAULT NULL
-) RETURNS INT AS $
+) RETURNS INT AS $$
 DECLARE
     alert_id INT;
 BEGIN
@@ -311,7 +311,7 @@ BEGIN
         p_message,
         p_data
     ) RETURNING id INTO alert_id;
-    
+
     -- Update the product status
     IF p_alert_type = 'in_stock' THEN
         UPDATE products
@@ -324,21 +324,21 @@ BEGIN
             last_out_of_stock = CURRENT_TIMESTAMP
         WHERE pid = p_pid;
     END IF;
-    
+
     RETURN alert_id;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 -- Triggers
 
 -- Trigger to schedule a stock check when a new product is added
 CREATE OR REPLACE FUNCTION trigger_stock_check_on_new_product()
-RETURNS TRIGGER AS $
+RETURNS TRIGGER AS $$
 BEGIN
     PERFORM add_stock_check_task(NEW.pid, NEW.module, 8);
     RETURN NEW;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_new_product_stock_check
 AFTER INSERT ON products
@@ -347,14 +347,14 @@ EXECUTE FUNCTION trigger_stock_check_on_new_product();
 
 -- Trigger to update product's last_check timestamp when availability is checked
 CREATE OR REPLACE FUNCTION update_product_last_check()
-RETURNS TRIGGER AS $
+RETURNS TRIGGER AS $$
 BEGIN
     UPDATE products
     SET last_check = CURRENT_TIMESTAMP
     WHERE pid = NEW.pid;
     RETURN NEW;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_update_product_last_check
 AFTER INSERT OR UPDATE ON product_availability
