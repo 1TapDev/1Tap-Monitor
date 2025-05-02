@@ -20,6 +20,7 @@ from utils.cloudflare_bypass import CloudflareBypass
 from utils.headers_generator import generate_chrome_headers
 from utils.config_loader import load_module_config, load_module_targets, update_pid_list
 from utils.request_logger import get_request_logger
+from utils.http_logger import get_http_logger
 
 logger = logging.getLogger("Booksamillion")
 
@@ -34,6 +35,7 @@ class Booksamillion:
     INTERVAL = 300  # Default check interval in seconds
 
     request_logger = get_request_logger()
+    http_logger = get_http_logger()
 
     def __init__(self):
         """Initialize the Books-A-Million module"""
@@ -305,6 +307,17 @@ class Booksamillion:
         logger.info(f"Response content type: {response.headers.get('Content-Type', 'unknown')}")
         logger.info(f"Response length: {len(response.text)} characters")
 
+        if response and response.status_code == 200:
+            # Log the complete HTTP transaction
+            log_path = self.http_logger.log_transaction(
+                request_url=bullseye_url,
+                request_method="GET",
+                request_headers=headers,
+                response=response,
+                pid=pid
+            )
+            logger.info(f"Complete HTTP transaction logged to {log_path}")
+
         # Always save the full response for debugging
         debug_dir = Path("logs/responses")
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -322,72 +335,44 @@ class Booksamillion:
             # First check the content type
             content_type = response.headers.get('Content-Type', '')
 
-            if 'application/json' in content_type:
-                # If it's proper JSON, parse it directly
+            # Look for JSON in the response regardless of content type
+            # Try direct JSON parsing first
+            try:
                 stock_data = response.json()
-                logger.info("Received JSON response")
-            elif 'text/html' in content_type:
-                # If it's HTML but might contain JSON, try to extract JSON
-                logger.warning("Received HTML response instead of JSON, attempting to extract JSON data")
+                logger.info("Successfully parsed JSON response")
+            except:
+                # If direct parsing fails, try to extract JSON from the HTML
+                logger.warning("Failed to parse as direct JSON, attempting to extract from HTML")
 
-                # Try to find JSON in the HTML response
-                json_match = re.search(r'({.*"ResultList":\[.*\]})', response.text)
+                # The successful response shows JSON at the bottom of the HTML
+                # Look for a JSON object that starts with {"userinfo":
+                json_match = re.search(r'({"userinfo":.*})', response.text)
                 if json_match:
                     try:
                         json_text = json_match.group(1)
-                        logger.info(f"Found potential JSON in HTML response: {json_text[:100]}...")
+                        logger.info(f"Found potential JSON with userinfo in HTML response")
                         stock_data = json.loads(json_text)
                         logger.info("Successfully extracted JSON from HTML response")
                     except json.JSONDecodeError as e:
-                        logger.error(f"Found potential JSON in HTML but couldn't parse it: {str(e)}")
-                        # Save the raw JSON text for debugging
-                        json_file = debug_dir / f"{pid}_json_{int(time.time())}.json"
-                        try:
-                            with open(json_file, "w") as f:
-                                f.write(json_match.group(1))
-                            logger.info(f"Saved raw JSON to {json_file}")
-                        except Exception as e:
-                            logger.error(f"Failed to save raw JSON: {str(e)}")
+                        logger.error(f"Found potential JSON but couldn't parse it: {str(e)}")
                         return result
                 else:
-                    # Try a more generic approach to find any JSON object
-                    json_pattern = r'({[^{]*"pidinfo":[^}]*})'
-                    json_match = re.search(json_pattern, response.text)
+                    # If no match for userinfo, try to find any JSON object
+                    logger.warning("No JSON with userinfo found, trying alternative patterns")
+
+                    # Look for any object with pidinfo
+                    json_match = re.search(r'({"pidinfo":.*})', response.text)
                     if json_match:
                         try:
                             json_text = json_match.group(1)
-                            logger.info(f"Found alternative JSON data in HTML response: {json_text[:100]}...")
                             stock_data = json.loads(json_text)
-                            logger.info("Found alternative JSON data in HTML response")
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Could not parse alternative JSON data: {str(e)}")
+                            logger.info("Found JSON with pidinfo")
+                        except:
+                            logger.error("Found potential JSON with pidinfo but couldn't parse it")
                             return result
                     else:
-                        # Try to find any JSON object in the response
-                        all_json_objects = re.findall(r'({[\s\S]*?})', response.text)
-
-                        # Log how many potential JSON objects we found
-                        logger.info(f"Found {len(all_json_objects)} potential JSON objects in the response")
-
-                        # Try to parse each one and look for relevant data
-                        for i, json_obj in enumerate(all_json_objects):
-                            try:
-                                data = json.loads(json_obj)
-                                # Check if this looks like our stock data
-                                if 'pidinfo' in data or 'ResultList' in data:
-                                    logger.info(f"Found valid JSON object #{i} with stock data")
-                                    stock_data = data
-                                    break
-                            except:
-                                # Just skip objects that don't parse as JSON
-                                pass
-                        else:
-                            # If we didn't break out of the loop, we didn't find any valid JSON
-                            logger.error("Could not find any valid JSON with stock data in the response")
-                            return result
-            else:
-                logger.error(f"Unexpected content type: {content_type}")
-                return result
+                        logger.error("Could not find any valid JSON in the response")
+                        return result
 
             # Log the stock data structure
             logger.info(f"Stock data keys: {list(stock_data.keys())}")

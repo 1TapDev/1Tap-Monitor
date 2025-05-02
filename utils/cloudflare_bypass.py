@@ -8,6 +8,7 @@ import time
 import logging
 import random
 import json
+import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any
 from utils.request_logger import get_request_logger
@@ -403,6 +404,17 @@ class CloudflareBypass:
 
                 # Make the actual request
                 response = self.session.get(url, **kwargs)
+
+                # Check if the response is valid JSON even if content-type is HTML
+                if 'application/json' in kwargs.get('headers', {}).get('Accept',
+                                                                       '') and 'text/html' in response.headers.get(
+                        'Content-Type', ''):
+                    logger.info("Response has HTML content type but we requested JSON, attempting to extract JSON")
+
+                    # Try to extract JSON from the HTML
+                    json_match = re.search(r'({"userinfo":.*})', response.text)
+                    if json_match:
+                        logger.info("Found JSON object in HTML response")
 
                 # Log the request and response
                 if enable_logging:
