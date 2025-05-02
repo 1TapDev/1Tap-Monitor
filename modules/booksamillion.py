@@ -49,7 +49,7 @@ from utils.config_loader import load_module_config, load_module_targets, update_
 logger = logging.getLogger("BooksAMillion")
 
 
-class BooksAMillion:
+class Booksamillion:
     """
     Module for checking stock on booksamillion.com
     """
@@ -716,3 +716,5 @@ if __name__ == "__main__":
     result = bam.check_stock(test_pid)
     print(f"Stock check result for {test_pid}:")
     print(json.dumps(result, indent=2))
+
+    Booksamillion = BooksAMillion
