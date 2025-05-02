@@ -10,6 +10,7 @@ import random
 import json
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any
+from utils.request_logger import get_request_logger
 
 import requests
 
@@ -41,12 +42,14 @@ except ImportError:
 from utils.headers_generator import generate_chrome_headers
 
 logger = logging.getLogger("CloudflareBypass")
-
+request_logger = get_request_logger()
 
 class CloudflareBypass:
     """
     Enhanced utility class for bypassing Cloudflare protection
     """
+
+    request_logger = get_request_logger()
 
     def __init__(self,
                  cookie_file: str = 'data/cloudflare_cookies.json',
@@ -371,7 +374,7 @@ class CloudflareBypass:
 
     def get(self, url: str, **kwargs) -> requests.Response:
         """
-        Make a GET request with Cloudflare bypass
+        Make a GET request with Cloudflare bypass and log details
 
         Args:
             url: URL to request
@@ -380,6 +383,12 @@ class CloudflareBypass:
         Returns:
             Response object
         """
+        # Get request parameters
+        enable_logging = kwargs.pop('enable_logging', True)
+        headers = kwargs.get('headers', {})
+        params = kwargs.get('params', None)
+        timeout = kwargs.get('timeout', 30)
+
         # Ensure we have valid cookies
         if 'cf_clearance' not in self.cookies:
             self.get_fresh_cookies()
@@ -390,7 +399,26 @@ class CloudflareBypass:
 
         for attempt in range(max_retries):
             try:
+                logger.info(f"Making request to {url} (attempt {attempt + 1}/{max_retries})")
+
+                # Make the actual request
                 response = self.session.get(url, **kwargs)
+
+                # Log the request and response
+                if enable_logging:
+                    log_path = self.request_logger.log_from_response(
+                        url=url,
+                        method="GET",
+                        headers=dict(self.session.headers) if headers is None else headers,
+                        params=params,
+                        response=response
+                    )
+                    logger.info(f"Request log saved to {log_path}")
+
+                readable_path = Path("logs/readable") / f"{int(time.time())}_{url.split('/')[-1]}.txt"
+                readable_path.parent.mkdir(parents=True, exist_ok=True)
+                self.request_logger.save_readable_response(response, readable_path)
+                logger.info(f"Readable response saved to {readable_path}")
 
                 # Check if we hit a Cloudflare challenge
                 if response.status_code == 403 or "challenge" in response.text.lower():
@@ -404,7 +432,20 @@ class CloudflareBypass:
                 return response
 
             except Exception as e:
-                logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
+                error_msg = f"Request error on attempt {attempt + 1}: {str(e)}"
+                logger.error(error_msg)
+
+                # Log the failed request
+                if enable_logging:
+                    log_path = self.request_logger.log_request(
+                        url=url,
+                        method="GET",
+                        headers=dict(self.session.headers) if headers is None else headers,
+                        params=params,
+                        error=error_msg
+                    )
+                    logger.info(f"Failed request log saved to {log_path}")
+
                 wait_time = backoff_factor * (2 ** attempt)
                 time.sleep(wait_time)
 
@@ -413,7 +454,7 @@ class CloudflareBypass:
 
     def post(self, url: str, **kwargs) -> requests.Response:
         """
-        Make a POST request with Cloudflare bypass
+        Make a POST request with Cloudflare bypass and log details
 
         Args:
             url: URL to request
@@ -422,6 +463,13 @@ class CloudflareBypass:
         Returns:
             Response object
         """
+        # Get request parameters
+        enable_logging = kwargs.pop('enable_logging', True)
+        headers = kwargs.get('headers', {})
+        params = kwargs.get('params', None)
+        data = kwargs.get('data', None)
+        json_data = kwargs.get('json', None)
+
         # Ensure we have valid cookies
         if 'cf_clearance' not in self.cookies:
             self.get_fresh_cookies()
@@ -432,7 +480,22 @@ class CloudflareBypass:
 
         for attempt in range(max_retries):
             try:
+                logger.info(f"Making POST request to {url} (attempt {attempt + 1}/{max_retries})")
+
+                # Make the actual request
                 response = self.session.post(url, **kwargs)
+
+                # Log the request and response
+                if enable_logging:
+                    log_path = self.request_logger.log_from_response(
+                        url=url,
+                        method="POST",
+                        headers=dict(self.session.headers) if headers is None else headers,
+                        params=params,
+                        data=data if data is not None else json_data,
+                        response=response
+                    )
+                    logger.info(f"Request log saved to {log_path}")
 
                 # Check if we hit a Cloudflare challenge
                 if response.status_code == 403 or "challenge" in response.text.lower():
@@ -446,7 +509,21 @@ class CloudflareBypass:
                 return response
 
             except Exception as e:
-                logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
+                error_msg = f"Request error on attempt {attempt + 1}: {str(e)}"
+                logger.error(error_msg)
+
+                # Log the failed request
+                if enable_logging:
+                    log_path = self.request_logger.log_request(
+                        url=url,
+                        method="POST",
+                        headers=dict(self.session.headers) if headers is None else headers,
+                        params=params,
+                        data=data if data is not None else json_data,
+                        error=error_msg
+                    )
+                    logger.info(f"Failed request log saved to {log_path}")
+
                 wait_time = backoff_factor * (2 ** attempt)
                 time.sleep(wait_time)
 

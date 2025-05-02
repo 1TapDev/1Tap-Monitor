@@ -19,9 +19,9 @@ import urllib.parse
 from utils.cloudflare_bypass import CloudflareBypass
 from utils.headers_generator import generate_chrome_headers
 from utils.config_loader import load_module_config, load_module_targets, update_pid_list
+from utils.request_logger import get_request_logger
 
 logger = logging.getLogger("Booksamillion")
-
 
 class Booksamillion:
     """
@@ -32,6 +32,8 @@ class Booksamillion:
     NAME = "Books-A-Million"
     VERSION = "1.1.0"
     INTERVAL = 300  # Default check interval in seconds
+
+    request_logger = get_request_logger()
 
     def __init__(self):
         """Initialize the Books-A-Million module"""
@@ -165,7 +167,7 @@ class Booksamillion:
 
     def _check_single_stock(self, pid: str, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """
-        Internal method to check stock for a single PID
+        Internal method to check stock for a single PID with detailed debugging
 
         Args:
             pid: Product ID to check
@@ -206,11 +208,18 @@ class Booksamillion:
             f"&PageSize=25"
         )
 
+        # Create the product page URL for referer
+        product_url = f"https://www.booksamillion.com/p/{pid}"
+
+        # Log the URLs we're using
+        logger.info(f"Bullseye URL: {bullseye_url}")
+        logger.info(f"Product URL (referer): {product_url}")
+
         # Add the required headers based on successful request
         headers = {
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Referer": f"https://www.booksamillion.com/p/{pid}",
+            "Referer": product_url,
             "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
@@ -223,6 +232,9 @@ class Booksamillion:
             "DNT": "1"
         }
 
+        # Log the headers we're using
+        logger.debug(f"Request headers: {headers}")
+
         # Attempt the request with retries and exponential backoff
         response = None
         max_retries = self.config["retry_attempts"]
@@ -230,19 +242,23 @@ class Booksamillion:
 
         for attempt in range(max_retries):
             try:
-                # Make the request with our enhanced bypass utility
+                # Enable detailed logging for this request
                 try:
-                    # Override the default headers with our specific ones
+                    # Make the request with our enhanced bypass utility
                     response = self.cf_bypass.get(
                         bullseye_url,
                         headers=headers,
                         timeout=self.config["timeout"],
-                        max_retries=2  # Internal retries for Cloudflare issues
+                        max_retries=2,  # Internal retries for Cloudflare issues
+                        enable_logging=True  # Enable detailed request logging
                     )
 
                     # If we get a successful response, break the retry loop
                     if response.status_code == 200:
+                        logger.info(f"Got successful response (HTTP 200) on attempt {attempt + 1}")
                         break
+                    else:
+                        logger.warning(f"Got HTTP {response.status_code} on attempt {attempt + 1}")
 
                 except Exception as e:
                     logger.error(f"Cloudflare bypass request error: {str(e)}")
@@ -264,6 +280,14 @@ class Booksamillion:
             except Exception as e:
                 logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
 
+                # Log the failed request details
+                self.request_logger.log_request(
+                    url=bullseye_url,
+                    method="GET",
+                    headers=headers,
+                    error=str(e)
+                )
+
                 # Calculate backoff time with jitter, capped at max_backoff
                 backoff_seconds = min(max_backoff, 1.5 * (2 ** attempt) * (0.8 + 0.4 * random.random()))
                 logger.info(f"Waiting {backoff_seconds:.2f} seconds before retry")
@@ -276,6 +300,22 @@ class Booksamillion:
         if not response or response.status_code != 200:
             logger.error(f"Failed to check stock for {pid} after {max_retries} attempts")
             return result
+
+        # Log response details
+        logger.info(f"Response content type: {response.headers.get('Content-Type', 'unknown')}")
+        logger.info(f"Response length: {len(response.text)} characters")
+
+        # Always save the full response for debugging
+        debug_dir = Path("logs/responses")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        response_file = debug_dir / f"{pid}_{int(time.time())}.html"
+
+        try:
+            with open(response_file, "w", encoding="utf-8") as f:
+                f.write(response.text)
+            logger.info(f"Saved full response to {response_file}")
+        except Exception as e:
+            logger.error(f"Failed to save response: {str(e)}")
 
         # Parse the response, handling different content types
         try:
@@ -294,10 +334,20 @@ class Booksamillion:
                 json_match = re.search(r'({.*"ResultList":\[.*\]})', response.text)
                 if json_match:
                     try:
-                        stock_data = json.loads(json_match.group(1))
+                        json_text = json_match.group(1)
+                        logger.info(f"Found potential JSON in HTML response: {json_text[:100]}...")
+                        stock_data = json.loads(json_text)
                         logger.info("Successfully extracted JSON from HTML response")
-                    except json.JSONDecodeError:
-                        logger.error("Found potential JSON in HTML but couldn't parse it")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Found potential JSON in HTML but couldn't parse it: {str(e)}")
+                        # Save the raw JSON text for debugging
+                        json_file = debug_dir / f"{pid}_json_{int(time.time())}.json"
+                        try:
+                            with open(json_file, "w") as f:
+                                f.write(json_match.group(1))
+                            logger.info(f"Saved raw JSON to {json_file}")
+                        except Exception as e:
+                            logger.error(f"Failed to save raw JSON: {str(e)}")
                         return result
                 else:
                     # Try a more generic approach to find any JSON object
@@ -305,28 +355,42 @@ class Booksamillion:
                     json_match = re.search(json_pattern, response.text)
                     if json_match:
                         try:
-                            stock_data = json.loads(json_match.group(1))
+                            json_text = json_match.group(1)
+                            logger.info(f"Found alternative JSON data in HTML response: {json_text[:100]}...")
+                            stock_data = json.loads(json_text)
                             logger.info("Found alternative JSON data in HTML response")
-                        except json.JSONDecodeError:
-                            logger.error("Could not parse alternative JSON data")
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Could not parse alternative JSON data: {str(e)}")
                             return result
                     else:
-                        # Save the response to a file for inspection (debug only)
-                        if self.config.get("debug_save_responses", False):
-                            try:
-                                debug_dir = Path("debug")
-                                debug_dir.mkdir(exist_ok=True)
-                                with open(f"debug/response_{pid}_{int(time.time())}.html", "w") as f:
-                                    f.write(response.text)
-                                logger.info(f"Saved problematic response to debug file")
-                            except Exception as e:
-                                logger.error(f"Could not save debug file: {str(e)}")
+                        # Try to find any JSON object in the response
+                        all_json_objects = re.findall(r'({[\s\S]*?})', response.text)
 
-                        logger.error("Could not find JSON data in HTML response")
-                        return result
+                        # Log how many potential JSON objects we found
+                        logger.info(f"Found {len(all_json_objects)} potential JSON objects in the response")
+
+                        # Try to parse each one and look for relevant data
+                        for i, json_obj in enumerate(all_json_objects):
+                            try:
+                                data = json.loads(json_obj)
+                                # Check if this looks like our stock data
+                                if 'pidinfo' in data or 'ResultList' in data:
+                                    logger.info(f"Found valid JSON object #{i} with stock data")
+                                    stock_data = data
+                                    break
+                            except:
+                                # Just skip objects that don't parse as JSON
+                                pass
+                        else:
+                            # If we didn't break out of the loop, we didn't find any valid JSON
+                            logger.error("Could not find any valid JSON with stock data in the response")
+                            return result
             else:
                 logger.error(f"Unexpected content type: {content_type}")
                 return result
+
+            # Log the stock data structure
+            logger.info(f"Stock data keys: {list(stock_data.keys())}")
 
             # Extract product details from pidinfo
             if 'pidinfo' in stock_data:
@@ -335,11 +399,18 @@ class Booksamillion:
                 result["url"] = stock_data['pidinfo'].get('td_url', '')
                 result["image"] = stock_data['pidinfo'].get('image_url', '')
 
+                logger.info(f"Extracted product details: {result['title']} (${result['price']})")
+
             # Extract store availability from ResultList
             if 'ResultList' in stock_data:
+                stores_count = len(stock_data['ResultList'])
+                in_stock_count = 0
+
                 for store in stock_data['ResultList']:
-                    if store.get('Availability', '').upper() == 'IN STOCK':
+                    availability = store.get('Availability', '')
+                    if availability.upper() == 'IN STOCK':
                         result["in_stock"] = True
+                        in_stock_count += 1
 
                         # Add store details
                         store_info = {
@@ -354,6 +425,8 @@ class Booksamillion:
                         }
 
                         result["stores"].append(store_info)
+
+                logger.info(f"Found {stores_count} stores, {in_stock_count} have stock")
 
             logger.info(f"Stock check for {pid} complete: {'IN STOCK' if result['in_stock'] else 'OUT OF STOCK'}")
 
