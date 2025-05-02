@@ -206,6 +206,23 @@ class Booksamillion:
             f"&PageSize=25"
         )
 
+        # Add the required headers based on successful request
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": f"https://www.booksamillion.com/p/{pid}",
+            "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-bitness": "64",
+            "sec-ch-ua-arch": "x86",
+            "sec-ch-ua-full-version": "135.0.7049.115",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+            "DNT": "1"
+        }
+
         # Attempt the request with retries and exponential backoff
         response = None
         max_retries = self.config["retry_attempts"]
@@ -213,15 +230,9 @@ class Booksamillion:
 
         for attempt in range(max_retries):
             try:
-                # Add request-specific headers
-                headers = {
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "Referer": f"https://www.booksamillion.com/p/{pid}"
-                }
-
                 # Make the request with our enhanced bypass utility
                 try:
+                    # Override the default headers with our specific ones
                     response = self.cf_bypass.get(
                         bullseye_url,
                         headers=headers,
@@ -266,9 +277,56 @@ class Booksamillion:
             logger.error(f"Failed to check stock for {pid} after {max_retries} attempts")
             return result
 
-        # Parse the JSON response
+        # Parse the response, handling different content types
         try:
-            stock_data = response.json()
+            # First check the content type
+            content_type = response.headers.get('Content-Type', '')
+
+            if 'application/json' in content_type:
+                # If it's proper JSON, parse it directly
+                stock_data = response.json()
+                logger.info("Received JSON response")
+            elif 'text/html' in content_type:
+                # If it's HTML but might contain JSON, try to extract JSON
+                logger.warning("Received HTML response instead of JSON, attempting to extract JSON data")
+
+                # Try to find JSON in the HTML response
+                json_match = re.search(r'({.*"ResultList":\[.*\]})', response.text)
+                if json_match:
+                    try:
+                        stock_data = json.loads(json_match.group(1))
+                        logger.info("Successfully extracted JSON from HTML response")
+                    except json.JSONDecodeError:
+                        logger.error("Found potential JSON in HTML but couldn't parse it")
+                        return result
+                else:
+                    # Try a more generic approach to find any JSON object
+                    json_pattern = r'({[^{]*"pidinfo":[^}]*})'
+                    json_match = re.search(json_pattern, response.text)
+                    if json_match:
+                        try:
+                            stock_data = json.loads(json_match.group(1))
+                            logger.info("Found alternative JSON data in HTML response")
+                        except json.JSONDecodeError:
+                            logger.error("Could not parse alternative JSON data")
+                            return result
+                    else:
+                        # Save the response to a file for inspection (debug only)
+                        if self.config.get("debug_save_responses", False):
+                            try:
+                                debug_dir = Path("debug")
+                                debug_dir.mkdir(exist_ok=True)
+                                with open(f"debug/response_{pid}_{int(time.time())}.html", "w") as f:
+                                    f.write(response.text)
+                                logger.info(f"Saved problematic response to debug file")
+                            except Exception as e:
+                                logger.error(f"Could not save debug file: {str(e)}")
+
+                        logger.error("Could not find JSON data in HTML response")
+                        return result
+            else:
+                logger.error(f"Unexpected content type: {content_type}")
+                return result
 
             # Extract product details from pidinfo
             if 'pidinfo' in stock_data:
@@ -304,8 +362,8 @@ class Booksamillion:
 
             return result
 
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse JSON response for {pid}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON response for {pid}: {str(e)}")
             return result
         except Exception as e:
             logger.error(f"Error processing stock data for {pid}: {str(e)}")

@@ -255,13 +255,19 @@ class CloudflareBypass:
             # Add additional headers to appear more like a real browser
             additional_headers = {
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Sec-Ch-Ua': '"Google Chrome";v="119", "Chromium";v="119"',
-                'Sec-Ch-Ua-Mobile': '?0',
-                'Sec-Ch-Ua-Platform': '"Windows"',
+                'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-ch-ua-bitness': '64',
+                'sec-ch-ua-arch': 'x86',
+                'sec-ch-ua-full-version': '135.0.7049.115',
+                'sec-ch-ua-platform-version': '19.0.0',
+                'sec-ch-ua-full-version-list': '"Google Chrome";v="135.0.7049.115", "Not-A.Brand";v="8.0.0.0", "Chromium";v="135.0.7049.115"',
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'none',
                 'Sec-Fetch-User': '?1',
+                'DNT': '1',
                 'Upgrade-Insecure-Requests': '1'
             }
             scraper.headers.update(additional_headers)
@@ -311,13 +317,19 @@ class CloudflareBypass:
             headers = generate_chrome_headers()
             headers.update({
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Sec-Ch-Ua': '"Google Chrome";v="112"',
-                'Sec-Ch-Ua-Mobile': '?0',
-                'Sec-Ch-Ua-Platform': '"Windows"',
+                'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-ch-ua-bitness': '64',
+                'sec-ch-ua-arch': 'x86',
+                'sec-ch-ua-full-version': '135.0.7049.115',
+                'sec-ch-ua-platform-version': '19.0.0',
+                'sec-ch-ua-full-version-list': '"Google Chrome";v="135.0.7049.115", "Not-A.Brand";v="8.0.0.0", "Chromium";v="135.0.7049.115"',
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'none',
                 'Sec-Fetch-User': '?1',
+                'DNT': '1',
                 'Upgrade-Insecure-Requests': '1'
             })
             client.headers.update(headers)
