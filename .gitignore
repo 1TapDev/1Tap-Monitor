@@ -71,3 +71,19 @@ tmp/
 *.key
 *.cert
 *.env
+
+# Data storage
+data/
+*.db
+*.sqlite3
+proxies.txt
+*_cookies.json
+*_products.json
+
+# Logs and debug files
+logs/
+logs/**/*
+*.log
+
+# Configuration
+config_*.json

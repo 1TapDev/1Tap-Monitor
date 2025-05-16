@@ -31,7 +31,7 @@ logger = logging.getLogger("StockChecker")
 def load_config():
     """Load configuration from config.json"""
     try:
-        with open('config.json', 'r') as f:
+        with open('config/config.json', 'r') as f:
             return json.load(f)
     except FileNotFoundError:
         logger.error("Config file not found. Creating a default one.")
@@ -46,7 +46,7 @@ def load_config():
             "use_proxies": True,
             "gui_enabled": False
         }
-        with open('config.json', 'w') as f:
+        with open('config/config.json', 'w') as f:
             json.dump(default_config, f, indent=4)
         return default_config
     except json.JSONDecodeError:
@@ -292,7 +292,7 @@ def setup_gui(config, dispatcher):
             config["check_interval"] = self.interval_var.get()
             config["use_proxies"] = self.use_proxies_var.get()
 
-            with open('config.json', 'w') as f:
+            with open('config/config.json', 'w') as f:
                 json.dump(config, f, indent=4)
 
             # Update components with new settings
