@@ -19,10 +19,9 @@ import urllib.parse
 from utils.cloudflare_bypass import CloudflareBypass
 from utils.headers_generator import generate_chrome_headers
 from utils.config_loader import load_module_config, load_module_targets, update_pid_list
-from utils.request_logger import get_request_logger
-from utils.http_logger import get_http_logger
 from utils.database_manager import get_database
 
+# Configure module logger to use main logger
 logger = logging.getLogger("Booksamillion")
 
 
@@ -35,9 +34,6 @@ class Booksamillion:
     NAME = "Books-A-Million"
     VERSION = "1.2.0"  # Updated version for database integration
     INTERVAL = 300  # Default check interval in seconds
-
-    request_logger = get_request_logger()
-    http_logger = get_http_logger()
 
     def __init__(self):
         """Initialize the Books-A-Million module"""
@@ -199,35 +195,35 @@ class Booksamillion:
             if not pids_to_check and self.item_urls:
                 for url in self.item_urls:
                     # Extract PID from URL
-                    pid_match = re.search(r'/([A-Za-z0-9]+)$', url)
+                    pid_match = re.search(r'/([A-Za-z0-9]+), url)
                     if pid_match:
                         pids_to_check.append(pid_match.group(1))
 
-            # If still no PIDs, check some from the product database
-            if not pids_to_check and self.products:
-                pids_to_check = list(self.products.keys())[:10]  # Limit to 10
+                    # If still no PIDs, check some from the product database
+                    if not pids_to_check and self.products:
+                        pids_to_check = list(self.products.keys())[:10]  # Limit to 10
 
-            # Check each PID
-            if pids_to_check:
-                logger.info(f"Checking {len(pids_to_check)} PIDs")
-                for pid_to_check in pids_to_check:
-                    result = self._check_single_stock(pid_to_check, proxy)
+                    # Check each PID
+                    if pids_to_check:
+                        logger.info(f"Checking {len(pids_to_check)} PIDs")
+                    for pid_to_check in pids_to_check:
+                        result = self._check_single_stock(pid_to_check, proxy)
                     results.append(result)
                     # Small delay between checks
                     time.sleep(random.uniform(1.0, 2.0))
-            else:
-                logger.warning("No PIDs configured to check")
+                    else:
+                    logger.warning("No PIDs configured to check")
 
-        else:
-            # Check the specified PID
-            result = self._check_single_stock(pid, proxy)
-            results.append(result)
+                    else:
+                    # Check the specified PID
+                    result = self._check_single_stock(pid, proxy)
+                    results.append(result)
 
         return results
 
     def _check_single_stock(self, pid: str, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """
-        Internal method to check stock for a single PID with detailed debugging
+        Internal method to check stock for a single PID
 
         Args:
             pid: Product ID to check
@@ -271,10 +267,6 @@ class Booksamillion:
         # Create the product page URL for referer
         product_url = f"https://www.booksamillion.com/p/{pid}"
 
-        # Log the URLs we're using
-        logger.info(f"Bullseye URL: {bullseye_url}")
-        logger.info(f"Product URL (referer): {product_url}")
-
         # Add the required headers based on successful request
         headers = {
             "X-Requested-With": "XMLHttpRequest",
@@ -292,9 +284,6 @@ class Booksamillion:
             "DNT": "1"
         }
 
-        # Log the headers we're using
-        logger.debug(f"Request headers: {headers}")
-
         # Attempt the request with retries and exponential backoff
         response = None
         max_retries = self.config["retry_attempts"]
@@ -302,36 +291,23 @@ class Booksamillion:
 
         for attempt in range(max_retries):
             try:
-                # Enable detailed logging for this request
-                try:
-                    # Make the request with our enhanced bypass utility
-                    response = self.cf_bypass.get(
-                        bullseye_url,
-                        headers=headers,
-                        timeout=self.config["timeout"],
-                        max_retries=2,  # Internal retries for Cloudflare issues
-                        enable_logging=True  # Enable detailed request logging
-                    )
+                # Make the request with our bypass utility
+                response = self.cf_bypass.get(
+                    bullseye_url,
+                    headers=headers,
+                    timeout=self.config["timeout"],
+                    max_retries=2  # Internal retries for Cloudflare issues
+                )
 
-                    # If we get a successful response, break the retry loop
-                    if response.status_code == 200:
-                        logger.info(f"Got successful response (HTTP 200) on attempt {attempt + 1}")
-                        break
-                    else:
-                        logger.warning(f"Got HTTP {response.status_code} on attempt {attempt + 1}")
-
-                except Exception as e:
-                    logger.error(f"Cloudflare bypass request error: {str(e)}")
-                    # If the Cloudflare bypass didn't handle the retry, we'll do it here
-                    pass
-
-                # If we get here, either the request failed or returned a non-200 status
-                logger.warning(
-                    f"Attempt {attempt + 1} failed: HTTP {response.status_code if response else 'No response'}")
+                # If we get a successful response, break the retry loop
+                if response.status_code == 200:
+                    logger.info(f"Got successful response on attempt {attempt + 1}")
+                    break
+                else:
+                    logger.warning(f"Got HTTP {response.status_code} on attempt {attempt + 1}")
 
                 # Calculate backoff time with jitter, capped at max_backoff
                 backoff_seconds = min(max_backoff, 1.5 * (2 ** attempt) * (0.8 + 0.4 * random.random()))
-                logger.info(f"Waiting {backoff_seconds:.2f} seconds before retry")
                 time.sleep(backoff_seconds)
 
                 # Refresh session for next attempt
@@ -340,17 +316,8 @@ class Booksamillion:
             except Exception as e:
                 logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
 
-                # Log the failed request details
-                self.request_logger.log_request(
-                    url=bullseye_url,
-                    method="GET",
-                    headers=headers,
-                    error=str(e)
-                )
-
                 # Calculate backoff time with jitter, capped at max_backoff
                 backoff_seconds = min(max_backoff, 1.5 * (2 ** attempt) * (0.8 + 0.4 * random.random()))
-                logger.info(f"Waiting {backoff_seconds:.2f} seconds before retry")
                 time.sleep(backoff_seconds)
 
                 # Refresh session for next attempt
@@ -361,79 +328,27 @@ class Booksamillion:
             logger.error(f"Failed to check stock for {pid} after {max_retries} attempts")
             return result
 
-        # Log response details
-        logger.info(f"Response content type: {response.headers.get('Content-Type', 'unknown')}")
-        logger.info(f"Response length: {len(response.text)} characters")
-
-        if response and response.status_code == 200:
-            # Log the complete HTTP transaction
-            log_path = self.http_logger.log_transaction(
-                request_url=bullseye_url,
-                request_method="GET",
-                request_headers=headers,
-                response=response,
-                pid=pid
-            )
-            logger.info(f"Complete HTTP transaction logged to {log_path}")
-
-        # Always save the full response for debugging
-        debug_dir = Path("logs/responses")
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        response_file = debug_dir / f"{pid}_{int(time.time())}.html"
-
-        try:
-            with open(response_file, "w", encoding="utf-8") as f:
-                f.write(response.text)
-            logger.info(f"Saved full response to {response_file}")
-        except Exception as e:
-            logger.error(f"Failed to save response: {str(e)}")
-
         # Parse the response, handling different content types
         try:
-            # First check the content type
-            content_type = response.headers.get('Content-Type', '')
-
-            # Look for JSON in the response regardless of content type
             # Try direct JSON parsing first
             try:
                 stock_data = response.json()
-                logger.info("Successfully parsed JSON response")
             except:
                 # If direct parsing fails, try to extract JSON from the HTML
-                logger.warning("Failed to parse as direct JSON, attempting to extract from HTML")
-
-                # The successful response shows JSON at the bottom of the HTML
                 # Look for a JSON object that starts with {"userinfo":
                 json_match = re.search(r'({"userinfo":.*})', response.text)
                 if json_match:
-                    try:
-                        json_text = json_match.group(1)
-                        logger.info(f"Found potential JSON with userinfo in HTML response")
-                        stock_data = json.loads(json_text)
-                        logger.info("Successfully extracted JSON from HTML response")
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Found potential JSON but couldn't parse it: {str(e)}")
-                        return result
+                    json_text = json_match.group(1)
+                    stock_data = json.loads(json_text)
                 else:
-                    # If no match for userinfo, try to find any JSON object
-                    logger.warning("No JSON with userinfo found, trying alternative patterns")
-
                     # Look for any object with pidinfo
                     json_match = re.search(r'({"pidinfo":.*})', response.text)
                     if json_match:
-                        try:
-                            json_text = json_match.group(1)
-                            stock_data = json.loads(json_text)
-                            logger.info("Found JSON with pidinfo")
-                        except:
-                            logger.error("Found potential JSON with pidinfo but couldn't parse it")
-                            return result
+                        json_text = json_match.group(1)
+                        stock_data = json.loads(json_text)
                     else:
                         logger.error("Could not find any valid JSON in the response")
                         return result
-
-            # Log the stock data structure
-            logger.info(f"Stock data keys: {list(stock_data.keys())}")
 
             # Extract product details from pidinfo
             if 'pidinfo' in stock_data:
@@ -442,7 +357,7 @@ class Booksamillion:
                 result["url"] = stock_data['pidinfo'].get('td_url', '')
                 result["image"] = stock_data['pidinfo'].get('image_url', '')
 
-                logger.info(f"Extracted product details: {result['title']} (${result['price']})")
+                logger.info(f"Extracted product details: {result['title']}")
 
             # Extract store availability from ResultList
             if 'ResultList' in stock_data:
@@ -656,7 +571,6 @@ class Booksamillion:
             product_file = Path(self.config["product_db_file"])
             with open(product_file, 'w') as f:
                 json.dump(self.products, f, indent=2)
-            logger.debug(f"Saved {len(self.products)} products to file backup")
         except Exception as e:
             logger.error(f"Error saving product database to file: {str(e)}")
 
@@ -763,7 +677,8 @@ if __name__ == "__main__":
     # Configure logging for standalone testing
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        filename="stock_monitor.log"
     )
 
     # Create and test the module
