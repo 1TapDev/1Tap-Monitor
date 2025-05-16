@@ -15,6 +15,9 @@ import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+# Add project root to path to fix import issues
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
 # Add color support for terminal output
 try:
     from colorama import init, Fore, Back, Style
@@ -39,7 +42,39 @@ except ImportError:
 from dispatcher import ModuleDispatcher
 from proxy_manager import ProxyManager
 from notifier import DiscordNotifier
-from utils.config_loader import load_global_config
+
+
+# Create __init__.py files if they don't exist to make proper Python packages
+def ensure_package_files():
+    """Ensure __init__.py files exist for proper Python package structure"""
+    package_dirs = [
+        '',  # Root directory
+        'utils',
+        'modules'
+    ]
+
+    for directory in package_dirs:
+        init_file = Path(directory) / '__init__.py'
+        if not init_file.exists():
+            try:
+                init_file.parent.mkdir(exist_ok=True)
+                with open(init_file, 'w') as f:
+                    f.write("# This file makes the directory a Python package\n")
+                print(f"Created {init_file}")
+            except Exception as e:
+                print(f"Warning: Could not create {init_file}: {e}")
+
+
+# Call this at startup
+ensure_package_files()
+
+try:
+    from utils.config_loader import load_global_config
+except ImportError:
+    print(f"{Fore.RED}Error: Could not import utils.config_loader.{Style.RESET_ALL}")
+    print(
+        f"{Fore.YELLOW}Make sure you have utils/__init__.py file (run this script once to create it).{Style.RESET_ALL}")
+    sys.exit(1)
 
 # Global variables
 running = True
@@ -53,6 +88,21 @@ def load_config():
     try:
         global config
         config = load_global_config()
+
+        # Ensure config has required structures
+        if 'modules' not in config:
+            config['modules'] = {}
+
+        if 'booksamillion' not in config['modules']:
+            config['modules']['booksamillion'] = {
+                "enabled": True,
+                "interval": 300  # 5 minutes
+            }
+
+        # Ensure directories exist
+        for directory in ['config', 'config/modules', 'data', 'logs', 'logs/requests', 'logs/readable']:
+            os.makedirs(directory, exist_ok=True)
+
         return config
     except Exception as e:
         print(f"{Fore.RED}Error loading configuration: {str(e)}{Style.RESET_ALL}")
@@ -239,19 +289,6 @@ def interactive_mode():
 
     while running:
         try:
-            # In auto-refresh mode, we use a timeout to allow regular updates
-            if auto_refresh:
-                # Check if it's time to refresh
-                if time.time() - last_refresh >= refresh_interval:
-                    # Status is already being updated by the status thread
-                    last_refresh = time.time()
-
-                # Use short timeout to catch commands while still allowing refreshes
-                ready, _, _ = select.select([sys.stdin], [], [], 0.1)
-
-                if not ready:
-                    continue
-
             # Get command from input
             command = input("\nCommand > ").strip().lower()
 
@@ -304,7 +341,7 @@ def interactive_mode():
                 print(f"Module {module_name}: {result}")
 
             elif action == "status":
-                # Status is already being updated by the status thread
+                # Manually update status display
                 pass
 
             elif action == "watch":
@@ -322,6 +359,86 @@ def interactive_mode():
             print(f"{Fore.RED}Error: {str(e)}{Style.RESET_ALL}")
 
 
+def create_default_configs():
+    """Create default configuration files if they don't exist"""
+    # Create global config
+    global_config_path = Path("config/global.json")
+    if not global_config_path.exists():
+        global_config = {
+            "discord_webhook": "https://discord.com/api/webhooks/1367540658767663274/bd5oxBHoOLun7w08zi_rQ4bkDk1ZZtocRnrU_rTmztwE2t4ilnBMs3bn3ViNkn5UTKfq",
+            "check_interval": 60,
+            "use_proxies": True,
+            "gui_enabled": False,
+            "modules": {
+                "booksamillion": {
+                    "enabled": True,
+                    "interval": 300  # 5 minutes
+                }
+            }
+        }
+
+        try:
+            with open(global_config_path, "w") as f:
+                json.dump(global_config, f, indent=2)
+            print(f"Created default global config at {global_config_path}")
+        except Exception as e:
+            print(f"Error creating global config: {e}")
+
+    # Create Books-A-Million module config
+    bam_config_path = Path("config/modules/booksamillion.json")
+    if not bam_config_path.exists():
+        bam_config = {
+            "name": "Books-A-Million",
+            "enabled": True,
+            "interval": 300,  # 5 minutes
+            "timeout": 30,
+            "retry_attempts": 5,
+            "search_radius": 250,
+            "target_zipcode": "30135",  # Douglasville, GA
+            "bypass_method": "cloudscraper",
+            "cookie_file": "data/booksamillion_cookies.json",
+            "product_db_file": "data/booksamillion_products.json",
+
+            "search_urls": [
+                "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date",
+                "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=2",
+                "https://www.booksamillion.com/search2?query=pokemon%20cards&filters%5Bcategory%5D=Toys&sort_by=release_date"
+            ],
+
+            "pids": [
+                "F820650412493",
+                "F820650413315",
+                "F820650859007"
+            ],
+
+            "keywords": [
+                "exclusive",
+                "limited edition",
+                "signed",
+                "pokemon",
+                "special edition",
+                "collector's edition"
+            ],
+
+            "webhook": {
+                "enabled": True,
+                "url": "https://discord.com/api/webhooks/1367540658767663274/bd5oxBHoOLun7w08zi_rQ4bkDk1ZZtocRnrU_rTmztwE2t4ilnBMs3bn3ViNkn5UTKfq",
+                "format": "discord",
+                "mentions": [],
+                "avatar_url": "https://www.booksamillion.com/favicon.ico",
+                "username": "FastBreakCards Monitors"
+            }
+        }
+
+        try:
+            bam_config_path.parent.mkdir(exist_ok=True, parents=True)
+            with open(bam_config_path, "w") as f:
+                json.dump(bam_config, f, indent=2)
+            print(f"Created default Books-A-Million config at {bam_config_path}")
+        except Exception as e:
+            print(f"Error creating Books-A-Million config: {e}")
+
+
 def main():
     """Main entry point for the enhanced CLI"""
     parser = argparse.ArgumentParser(description='Stock Checker Enhanced CLI')
@@ -334,6 +451,9 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Create default config files if needed
+    create_default_configs()
+
     # Load configuration
     load_config()
 
@@ -345,8 +465,6 @@ def main():
     if args.daemon:
         daemon_mode()
     else:
-        # For interactive mode, we need the select module for input handling
-        import select
         interactive_mode()
 
 

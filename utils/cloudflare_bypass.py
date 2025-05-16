@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced Cloudflare Bypass Utility
-Provides methods to bypass Cloudflare anti-bot protection
+Fixed CloudflareBypass Utility
+Provides methods to bypass Cloudflare anti-bot protection with efficient cookie handling
 """
 
 import time
@@ -9,9 +9,9 @@ import logging
 import random
 import json
 import re
+import os
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Any
-from utils.request_logger import get_request_logger
 
 import requests
 
@@ -24,38 +24,153 @@ except ImportError:
     CLOUDSCRAPER_AVAILABLE = False
 
 try:
-    import undetected_chromedriver as uc
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-
-    SELENIUM_AVAILABLE = True
-except ImportError:
-    SELENIUM_AVAILABLE = False
-
-try:
     import tls_client
 
     TLS_CLIENT_AVAILABLE = True
 except ImportError:
     TLS_CLIENT_AVAILABLE = False
 
-from utils.headers_generator import generate_chrome_headers
+try:
+    from utils.headers_generator import generate_chrome_headers
+except ImportError:
+    # Fallback headers generator if the import fails
+    def generate_chrome_headers():
+        return {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "DNT": "1"
+        }
 
+# Configure logger
 logger = logging.getLogger("CloudflareBypass")
-request_logger = get_request_logger()
+
+
+class RequestLogger:
+    """Simplified request logger for CloudflareBypass"""
+
+    def __init__(self):
+        self.log_dir = Path("logs/requests")
+        self.readable_dir = Path("logs/readable")
+        self.enabled = True  # Default to enabled
+        self.save_readable = False  # Default to disable readable logs
+
+        # Create directories
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.readable_dir.mkdir(parents=True, exist_ok=True)
+
+    def log_from_response(self, url, method, headers, params=None, response=None):
+        """Log request and response to file"""
+        if not self.enabled:
+            return None
+
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+
+        # Create a safe filename from the URL
+        url_part = self._safe_filename(url)
+        filename = f"{timestamp}_{method}_{url_part}.log"
+        filepath = self.log_dir / filename
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(f"===== REQUEST: {url} =====\n")
+                f.write(f"Method: {method}\n")
+                f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("\n----- Request Headers -----\n")
+                f.write(f"{headers}\n")
+
+                if params:
+                    f.write("\n----- Request Parameters -----\n")
+                    f.write(f"{params}\n")
+
+                f.write("\n----- Request Data -----\n")
+                f.write("\n")
+
+                if response:
+                    f.write("\n===== RESPONSE =====\n")
+                    f.write(f"Status Code: {response.status_code}\n")
+                    f.write("\n----- Response Headers -----\n")
+                    f.write(f"{dict(response.headers)}\n")
+                    f.write("\n----- Response Body -----\n")
+                    f.write(response.text[:10000])  # Limit to first 10K chars
+                    if len(response.text) > 10000:
+                        f.write("\n... (truncated)")
+
+            return str(filepath)
+        except Exception as e:
+            logger.error(f"Failed to log request: {str(e)}")
+            return None
+
+    def save_readable_response(self, response, output_path=None):
+        """Save response content in readable format"""
+        if not self.enabled or not self.save_readable:
+            return False
+
+        if output_path is None:
+            timestamp = int(time.time())
+
+            # Create a safe filename from the URL
+            url_part = self._safe_filename(response.url)
+            filename = f"{timestamp}_{url_part}.txt"
+            output_path = self.readable_dir / filename
+
+        try:
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(f"Status: {response.status_code}\n\n")
+                f.write("Headers:\n")
+                for key, value in response.headers.items():
+                    f.write(f"{key}: {value}\n")
+
+                f.write("\n\nBody:\n")
+                f.write(response.text)
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save readable response: {str(e)}")
+            return False
+
+    def _safe_filename(self, url):
+        """Convert URL to safe filename"""
+        # Extract domain and path
+        if isinstance(url, str):
+            # Remove protocol
+            url = re.sub(r'^https?://', '', url)
+
+            # Get domain and first part of path
+            parts = url.split('/')
+            domain = parts[0]
+
+            # Get the first path segment if it exists
+            path = parts[1] if len(parts) > 1 else ""
+
+            # Remove query parameters and fragments
+            path = path.split('?')[0].split('#')[0]
+
+            # Combine with max length limit
+            result = f"{domain}_{path}"
+
+            # Replace invalid characters
+            result = re.sub(r'[\\/*?:"<>|]', '_', result)
+
+            # Limit length
+            if len(result) > 50:
+                result = result[:50]
+
+            return result
+        else:
+            return "unknown_url"
+
 
 class CloudflareBypass:
     """
-    Enhanced utility class for bypassing Cloudflare protection
+    Utility class for bypassing Cloudflare protection
     """
-
-    request_logger = get_request_logger()
 
     def __init__(self,
                  cookie_file: str = 'data/cloudflare_cookies.json',
                  base_url: str = 'https://www.example.com',
-                 target_page: str = '/'):
+                 target_page: str = '/',
+                 cookie_max_age: int = 3600):  # Default to 1 hour cookie lifetime
         """
         Initialize the Cloudflare bypass utility
 
@@ -63,17 +178,29 @@ class CloudflareBypass:
             cookie_file: Path to the cookie file
             base_url: Base URL of the site with Cloudflare
             target_page: Specific page to use for cookie generation
+            cookie_max_age: Maximum age of cookies in seconds before refreshing
         """
         self.cookie_file = Path(cookie_file)
         self.base_url = base_url.rstrip('/')
         self.target_page = target_page if target_page.startswith('/') else f'/{target_page}'
+        self.cookie_max_age = cookie_max_age
         self.cookies = self._load_cookies()
+        self.last_cookie_refresh = time.time() if self.cookies else 0
+        self.failed_attempts = 0
+        self.max_failed_attempts = 3  # Max failures before refreshing cookies
 
         # Ensure data directory exists
         self.cookie_file.parent.mkdir(exist_ok=True)
 
         # Session for making requests
         self.session = self._create_session()
+
+        # Create request logger
+        self.request_logger = RequestLogger()
+
+        # Set default logging behavior
+        self.enable_logging = True
+        self.save_readable = False
 
     def _load_cookies(self) -> Dict[str, str]:
         """
@@ -87,8 +214,8 @@ class CloudflareBypass:
                 with open(self.cookie_file, 'r') as f:
                     cookie_data = json.load(f)
 
-                    # Check if cookies are still valid (within 23 hours)
-                    if cookie_data.get('timestamp', 0) > time.time() - 82800:
+                    # Check if cookies are still valid
+                    if cookie_data.get('timestamp', 0) > time.time() - self.cookie_max_age:
                         logger.info("Loaded valid cookies from file")
                         return cookie_data.get('cookies', {})
             except Exception as e:
@@ -139,6 +266,27 @@ class CloudflareBypass:
 
         return session
 
+    def should_refresh_cookies(self):
+        """
+        Determine if cookies should be refreshed
+
+        Returns:
+            bool: True if cookies should be refreshed
+        """
+        # No cookies or expired cookies
+        if not self.cookies or 'cf_clearance' not in self.cookies:
+            return True
+
+        # Cookies too old
+        if time.time() - self.last_cookie_refresh > self.cookie_max_age:
+            return True
+
+        # Too many failed attempts
+        if self.failed_attempts >= self.max_failed_attempts:
+            return True
+
+        return False
+
     def get_fresh_cookies(self) -> bool:
         """
         Get fresh Cloudflare cookies using multiple methods
@@ -150,7 +298,6 @@ class CloudflareBypass:
 
         # Try different methods in order of reliability
         methods = [
-            self._get_cookies_with_selenium,
             self._get_cookies_with_cloudscraper,
             self._get_cookies_with_tls_client
         ]
@@ -159,78 +306,12 @@ class CloudflareBypass:
         for method in methods:
             success = method()
             if success:
+                self.last_cookie_refresh = time.time()
+                self.failed_attempts = 0
                 return True
 
         logger.error("All cookie generation methods failed")
         return False
-
-    def _get_cookies_with_selenium(self) -> bool:
-        """
-        Get cookies using Selenium with undetected-chromedriver
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if not SELENIUM_AVAILABLE:
-            logger.warning("Selenium not available for Cloudflare bypass")
-            return False
-
-        try:
-            logger.info("Attempting to get cookies with Selenium...")
-
-            # Configure Chrome options
-            options = uc.ChromeOptions()
-            options.add_argument('--headless')
-            options.add_argument('--no-sandbox')
-            options.add_argument('--disable-gpu')
-            options.add_argument('--disable-extensions')
-            options.add_argument('--disable-dev-shm-usage')
-            options.add_argument(f'--user-agent={generate_chrome_headers()["User-Agent"]}')
-
-            # Create driver with a longer page load timeout
-            driver = uc.Chrome(options=options)
-            driver.set_page_load_timeout(30)
-
-            # Navigate to the site
-            target_url = f"{self.base_url}{self.target_page}"
-            logger.info(f"Navigating to {target_url}")
-            driver.get(target_url)
-
-            # Wait for page to load fully and Cloudflare to resolve
-            logger.info("Waiting for Cloudflare challenge to resolve...")
-
-            # Wait for a common element that would appear after Cloudflare challenge
-            try:
-                WebDriverWait(driver, 20).until(
-                    EC.presence_of_element_located((By.TAG_NAME, "body"))
-                )
-
-                # Additional wait for possible Cloudflare challenge
-                time.sleep(5)
-            except Exception as e:
-                logger.warning(f"Timed out waiting for page elements: {e}")
-
-            # Extract cookies
-            cookies = {}
-            for cookie in driver.get_cookies():
-                cookies[cookie['name']] = cookie['value']
-
-            # Close browser
-            driver.quit()
-
-            # Check if we got the Cloudflare cookies
-            if 'cf_clearance' in cookies:
-                self.cookies = cookies
-                self._save_cookies(cookies)
-                logger.info("Successfully obtained Cloudflare cookies with Selenium")
-                return True
-            else:
-                logger.warning("Failed to get Cloudflare cookies with Selenium")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error using Selenium for cookies: {str(e)}")
-            return False
 
     def _get_cookies_with_cloudscraper(self) -> bool:
         """
@@ -367,7 +448,7 @@ class CloudflareBypass:
             Session object for making requests
         """
         # Check if we need to refresh cookies
-        if 'cf_clearance' not in self.cookies:
+        if self.should_refresh_cookies():
             self.get_fresh_cookies()
 
         # Create a new session with current cookies
@@ -385,13 +466,13 @@ class CloudflareBypass:
             Response object
         """
         # Get request parameters
-        enable_logging = kwargs.pop('enable_logging', True)
+        enable_logging = kwargs.pop('enable_logging', self.enable_logging)
         headers = kwargs.get('headers', {})
         params = kwargs.get('params', None)
         timeout = kwargs.get('timeout', 30)
 
         # Ensure we have valid cookies
-        if 'cf_clearance' not in self.cookies:
+        if self.should_refresh_cookies():
             self.get_fresh_cookies()
 
         # Make the request
@@ -408,7 +489,7 @@ class CloudflareBypass:
                 # Check if the response is valid JSON even if content-type is HTML
                 if 'application/json' in kwargs.get('headers', {}).get('Accept',
                                                                        '') and 'text/html' in response.headers.get(
-                        'Content-Type', ''):
+                    'Content-Type', ''):
                     logger.info("Response has HTML content type but we requested JSON, attempting to extract JSON")
 
                     # Try to extract JSON from the HTML
@@ -425,12 +506,17 @@ class CloudflareBypass:
                         params=params,
                         response=response
                     )
-                    logger.info(f"Request log saved to {log_path}")
+                    if log_path:
+                        logger.info(f"Request log saved to {log_path}")
 
-                readable_path = Path("logs/readable") / f"{int(time.time())}_{url.split('/')[-1]}.txt"
-                readable_path.parent.mkdir(parents=True, exist_ok=True)
-                self.request_logger.save_readable_response(response, readable_path)
-                logger.info(f"Readable response saved to {readable_path}")
+                # Save readable response if enabled
+                if self.save_readable:
+                    timestamp = int(time.time())
+                    readable_filename = self.request_logger._safe_filename(url)
+                    readable_path = Path("logs/readable") / f"{timestamp}_{readable_filename}.txt"
+
+                    if self.request_logger.save_readable_response(response, readable_path):
+                        logger.info(f"Readable response saved to {readable_path}")
 
                 # Check if we hit a Cloudflare challenge
                 if response.status_code == 403 or "challenge" in response.text.lower():
@@ -441,25 +527,29 @@ class CloudflareBypass:
                     self.session = self._create_session()
                     continue
 
+                # Successful request
+                if response.status_code == 200:
+                    self.failed_attempts = 0
+                else:
+                    # Track failed attempts
+                    self.failed_attempts += 1
+
                 return response
 
             except Exception as e:
                 error_msg = f"Request error on attempt {attempt + 1}: {str(e)}"
                 logger.error(error_msg)
 
-                # Log the failed request
-                if enable_logging:
-                    log_path = self.request_logger.log_request(
-                        url=url,
-                        method="GET",
-                        headers=dict(self.session.headers) if headers is None else headers,
-                        params=params,
-                        error=error_msg
-                    )
-                    logger.info(f"Failed request log saved to {log_path}")
+                # Track failed attempts
+                self.failed_attempts += 1
 
-                wait_time = backoff_factor * (2 ** attempt)
+                # Calculate backoff time with jitter, capped at 30 seconds
+                wait_time = min(30, backoff_factor * (2 ** attempt) * (0.8 + 0.4 * random.random()))
                 time.sleep(wait_time)
+
+                # Refresh session for next attempt if this isn't the last try
+                if attempt < max_retries - 1:
+                    self.refresh_session()
 
         # If we get here, all retries failed
         raise Exception(f"Failed to get {url} after {max_retries} attempts")
@@ -476,14 +566,14 @@ class CloudflareBypass:
             Response object
         """
         # Get request parameters
-        enable_logging = kwargs.pop('enable_logging', True)
+        enable_logging = kwargs.pop('enable_logging', self.enable_logging)
         headers = kwargs.get('headers', {})
         params = kwargs.get('params', None)
         data = kwargs.get('data', None)
         json_data = kwargs.get('json', None)
 
         # Ensure we have valid cookies
-        if 'cf_clearance' not in self.cookies:
+        if self.should_refresh_cookies():
             self.get_fresh_cookies()
 
         # Make the request
@@ -504,10 +594,10 @@ class CloudflareBypass:
                         method="POST",
                         headers=dict(self.session.headers) if headers is None else headers,
                         params=params,
-                        data=data if data is not None else json_data,
                         response=response
                     )
-                    logger.info(f"Request log saved to {log_path}")
+                    if log_path:
+                        logger.info(f"Request log saved to {log_path}")
 
                 # Check if we hit a Cloudflare challenge
                 if response.status_code == 403 or "challenge" in response.text.lower():
@@ -518,64 +608,71 @@ class CloudflareBypass:
                     self.session = self._create_session()
                     continue
 
+                # Successful request
+                if response.status_code == 200:
+                    self.failed_attempts = 0
+                else:
+                    # Track failed attempts
+                    self.failed_attempts += 1
+
                 return response
 
             except Exception as e:
                 error_msg = f"Request error on attempt {attempt + 1}: {str(e)}"
                 logger.error(error_msg)
 
-                # Log the failed request
-                if enable_logging:
-                    log_path = self.request_logger.log_request(
-                        url=url,
-                        method="POST",
-                        headers=dict(self.session.headers) if headers is None else headers,
-                        params=params,
-                        data=data if data is not None else json_data,
-                        error=error_msg
-                    )
-                    logger.info(f"Failed request log saved to {log_path}")
+                # Track failed attempts
+                self.failed_attempts += 1
 
-                wait_time = backoff_factor * (2 ** attempt)
+                # Calculate backoff time with jitter, capped at 30 seconds
+                wait_time = min(30, backoff_factor * (2 ** attempt) * (0.8 + 0.4 * random.random()))
                 time.sleep(wait_time)
+
+                # Refresh session for next attempt if this isn't the last try
+                if attempt < max_retries - 1:
+                    self.refresh_session()
 
         # If we get here, all retries failed
         raise Exception(f"Failed to post to {url} after {max_retries} attempts")
 
+    def refresh_session(self):
+        """Refresh the session with new cookies"""
+        self.get_fresh_cookies()
+        self.session = self._create_session()
+        logger.info("Refreshed session with new cookies")
 
-def create_session(
-        bypass_method: str = "auto",
-        base_url: str = None,
-        cookie_file: str = None
-) -> requests.Session:
+    def set_logging(self, enable_logging=True, save_readable=False):
+        """Configure logging behavior"""
+        self.enable_logging = enable_logging
+        self.save_readable = save_readable
+        self.request_logger.enabled = enable_logging
+        self.request_logger.save_readable = save_readable
+
+
+# Create a function to get cloudflare bypass instance
+def get_cloudflare_bypass(base_url, cookie_file=None, cookie_max_age=3600):
     """
-    Create a request session with Cloudflare bypass capability
+    Get a CloudflareBypass instance for a specific site
 
     Args:
-        bypass_method: Method to use for bypass ("auto", "cloudscraper", "selenium", "tls_client")
-        base_url: Base URL for the site (needed for some methods)
-        cookie_file: Path to cookie file (optional)
+        base_url: Base URL for the site
+        cookie_file: Optional custom cookie file path
+        cookie_max_age: Maximum age of cookies in seconds
 
     Returns:
-        Session object for making requests
+        CloudflareBypass instance
     """
-    # For backwards compatibility, provide simple session creation
-    if bypass_method == "cloudscraper" and CLOUDSCRAPER_AVAILABLE:
-        session = cloudscraper.create_scraper()
-        logger.info("Created CloudScraper session")
-        return session
-    elif bypass_method == "tls_client" and TLS_CLIENT_AVAILABLE:
-        session = tls_client.Session(client_identifier="chrome112")
-        logger.info("Created TLS Client session")
-        return session
-    else:
-        # If no specific method requested or requested method not available,
-        # return a regular session with good headers
-        session = requests.Session()
-        headers = generate_chrome_headers()
-        session.headers.update(headers)
-        logger.info("Created regular requests session with browser headers")
-        return session
+    if not cookie_file:
+        # Generate a filename based on the domain
+        domain = re.sub(r'^https?://', '', base_url).split('/')[0]
+        cookie_file = f"data/{domain}_cookies.json"
+
+    return CloudflareBypass(
+        cookie_file=cookie_file,
+        base_url=base_url,
+        target_page="/",
+        cookie_max_age=cookie_max_age
+    )
 
 
 # Test the module if run directly
@@ -586,12 +683,14 @@ if __name__ == "__main__":
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    # Create a Cloudflare bypass instance for a specific site
-    bypass = CloudflareBypass(
-        cookie_file='data/bam_cookies.json',
+    # Create a Cloudflare bypass instance for Books-A-Million
+    bypass = get_cloudflare_bypass(
         base_url='https://www.booksamillion.com',
-        target_page='/'
+        cookie_file='data/booksamillion_cookies.json'
     )
+
+    # Configure logging behavior
+    bypass.set_logging(enable_logging=True, save_readable=False)
 
     # Get fresh cookies
     bypass.get_fresh_cookies()
@@ -602,8 +701,6 @@ if __name__ == "__main__":
     print(f"Response length: {len(response.text)}")
 
     # Extract page title to verify we got past Cloudflare
-    import re
-
     title_match = re.search(r'<title>(.*?)</title>', response.text)
     if title_match:
         print(f"Page title: {title_match.group(1)}")

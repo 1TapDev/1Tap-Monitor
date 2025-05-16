@@ -4,9 +4,9 @@ Configuration Loader Utility
 Provides functions for loading module configurations from the config directory.
 """
 
-import os
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -15,22 +15,25 @@ logger = logging.getLogger("ConfigLoader")
 
 def ensure_config_dirs():
     """Create configuration directories if they don't exist"""
-    # Get the project root directory (parent of the current directory)
+    # Get the project root directory
     root_dir = Path(__file__).resolve().parent.parent
-    
+
+    # Create required directories
     dirs = [
         root_dir / "config",
         root_dir / "config/modules",
-        root_dir / "config/targets"
+        root_dir / "data"
     ]
 
     for directory in dirs:
         directory.mkdir(exist_ok=True)
 
+    logger.debug("Configuration directories verified")
+
 
 def load_module_config(module_name: str) -> Dict[str, Any]:
     """
-    Load module-specific configuration from config/modules directory
+    Load consolidated module configuration
 
     Args:
         module_name: Name of the module
@@ -42,173 +45,142 @@ def load_module_config(module_name: str) -> Dict[str, Any]:
 
     # Get the project root directory
     root_dir = Path(__file__).resolve().parent.parent
-    
-    # Define path to module config
-    config_path = root_dir / f"config/modules/{module_name}.json"
 
-    # Check if config file exists
-    if not config_path.exists():
-        logger.warning(f"No module config found for {module_name}")
-        return {}
+    # Define possible config paths with preference order
+    config_paths = [
+        root_dir / f"config/modules/{module_name}.json",
+        root_dir / f"config/{module_name}.json",
+        root_dir / f"config/config_{module_name}.json",
+        root_dir / f"config_{module_name}.json"
+    ]
 
-    # Load config
-    try:
-        with open(config_path, "r") as f:
-            config = json.load(f)
-            logger.info(f"Loaded module config for {module_name}")
-            return config
-    except Exception as e:
-        logger.error(f"Error loading module config for {module_name}: {str(e)}")
-        return {}
+    # Try each path until we find a config file
+    for config_path in config_paths:
+        if config_path.exists():
+            try:
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+                    logger.info(f"Loaded module config from {config_path}")
+                    return config
+            except Exception as e:
+                logger.error(f"Error loading config from {config_path}: {str(e)}")
+
+    # If no config found, check for legacy target files
+    targets = load_legacy_targets(module_name)
+    if targets:
+        logger.info(f"Loaded legacy target files for {module_name}")
+        return targets
+
+    logger.warning(f"No configuration found for {module_name}")
+    return {}
 
 
-def load_module_targets(module_name: str) -> Dict[str, Any]:
+def load_legacy_targets(module_name: str) -> Dict[str, Any]:
     """
-    Load all target configurations (URLs, PIDs, keywords) for a specific module
+    Load legacy target files (for backward compatibility)
 
     Args:
         module_name: Name of the module
 
     Returns:
-        Dict with all target configurations
+        Dict with target configurations
     """
-    ensure_config_dirs()
-
-    # Create default return structure
-    targets = {
-        "urls": [],
-        "search_urls": [],
-        "item_urls": [],
-        "pids": [],
-        "priority_pids": [],
-        "keywords": [],
-        "categories": [],
-        "brands": []
-    }
-
     # Get the project root directory
     root_dir = Path(__file__).resolve().parent.parent
-    
-    # Define paths
-    base_path = root_dir / "config/targets" / module_name
 
-    # Ensure module targets directory exists
-    base_path.mkdir(exist_ok=True)
+    # Define the legacy targets path
+    targets_path = root_dir / "config/targets" / module_name
 
-    # Load URLs if available
-    url_file = base_path / "urls.json"
-    if url_file.exists():
+    if not targets_path.exists():
+        return {}
+
+    targets = {}
+
+    # Load keywords if available
+    keywords_file = targets_path / "keywords.json"
+    if keywords_file.exists():
         try:
-            with open(url_file, "r") as f:
-                url_data = json.load(f)
-                targets["search_urls"] = url_data.get("search_urls", [])
-                targets["item_urls"] = url_data.get("item_urls", [])
-                # For backward compatibility
-                targets["urls"] = targets["search_urls"] + targets["item_urls"]
-            logger.info(f"Loaded URL targets for {module_name}")
+            with open(keywords_file, "r") as f:
+                keyword_data = json.load(f)
+                targets.update(keyword_data)
         except Exception as e:
-            logger.error(f"Error loading URLs for {module_name}: {str(e)}")
+            logger.error(f"Error loading keywords for {module_name}: {str(e)}")
 
     # Load PIDs if available
-    pid_file = base_path / "pid_list.json"
+    pid_file = targets_path / "pid_list.json"
     if pid_file.exists():
         try:
             with open(pid_file, "r") as f:
                 pid_data = json.load(f)
-                targets["pids"] = pid_data.get("pids", [])
-                targets["priority_pids"] = pid_data.get("priority_pids", [])
-            logger.info(f"Loaded PID targets for {module_name}")
+                targets.update(pid_data)
         except Exception as e:
             logger.error(f"Error loading PIDs for {module_name}: {str(e)}")
 
-    # Load keywords if available
-    keyword_file = base_path / "keywords.json"
-    if keyword_file.exists():
+    # Load URLs if available
+    url_file = targets_path / "urls.json"
+    if url_file.exists():
         try:
-            with open(keyword_file, "r") as f:
-                keyword_data = json.load(f)
-                targets["keywords"] = keyword_data.get("keywords", [])
-                targets["categories"] = keyword_data.get("categories", [])
-                targets["brands"] = keyword_data.get("brands", [])
-            logger.info(f"Loaded keyword targets for {module_name}")
+            with open(url_file, "r") as f:
+                url_data = json.load(f)
+                targets.update(url_data)
         except Exception as e:
-            logger.error(f"Error loading keywords for {module_name}: {str(e)}")
+            logger.error(f"Error loading URLs for {module_name}: {str(e)}")
 
     return targets
 
 
-def save_module_targets(module_name: str, target_type: str, data: Dict[str, Any]) -> bool:
+def save_module_config(module_name: str, config: Dict[str, Any]) -> bool:
     """
-    Save target configuration for a specific module
+    Save consolidated module configuration
 
     Args:
         module_name: Name of the module
-        target_type: Type of target ('urls', 'pids', 'keywords')
-        data: Target data to save
+        config: Configuration to save
 
     Returns:
-        bool: True if successful, False otherwise
+        bool: True if successful
     """
     ensure_config_dirs()
 
     # Get the project root directory
     root_dir = Path(__file__).resolve().parent.parent
-    
-    # Define paths
-    base_path = root_dir / "config/targets" / module_name
 
-    # Ensure module targets directory exists
-    base_path.mkdir(exist_ok=True)
+    # Define config path
+    config_path = root_dir / f"config/modules/{module_name}.json"
 
-    # Determine file path based on target type
-    if target_type == 'urls':
-        file_path = base_path / "urls.json"
-    elif target_type == 'pids':
-        file_path = base_path / "pid_list.json"
-    elif target_type == 'keywords':
-        file_path = base_path / "keywords.json"
-    else:
-        logger.error(f"Unknown target type: {target_type}")
-        return False
-
-    # Save data
     try:
-        with open(file_path, "w") as f:
-            json.dump(data, f, indent=2)
-        logger.info(f"Saved {target_type} targets for {module_name}")
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2)
+        logger.info(f"Saved module config to {config_path}")
         return True
     except Exception as e:
-        logger.error(f"Error saving {target_type} for {module_name}: {str(e)}")
+        logger.error(f"Error saving config to {config_path}: {str(e)}")
         return False
 
 
 def update_pid_list(module_name: str, new_pids: List[str]) -> bool:
     """
-    Update PID list for a module by adding new PIDs
+    Update PID list in configuration
 
     Args:
         module_name: Name of the module
-        new_pids: List of new PIDs to add
+        new_pids: New PIDs to add
 
     Returns:
-        bool: True if successful, False otherwise
+        bool: True if successful
     """
-    # Load current PIDs
-    targets = load_module_targets(module_name)
-    current_pids = set(targets.get("pids", []))
+    # Load current configuration
+    config = load_module_config(module_name)
 
     # Add new PIDs
+    current_pids = set(config.get("pids", []))
     current_pids.update(new_pids)
 
-    # Save updated PIDs
-    pid_data = {
-        "pids": list(current_pids),
-        "priority_pids": targets.get("priority_pids", []),
-        "last_updated": targets.get("last_updated", ""),
-        "last_scanned": targets.get("last_scanned", "")
-    }
+    # Update configuration
+    config["pids"] = list(current_pids)
 
-    return save_module_targets(module_name, "pids", pid_data)
+    # Save configuration
+    return save_module_config(module_name, config)
 
 
 def load_global_config() -> Dict[str, Any]:
@@ -222,37 +194,51 @@ def load_global_config() -> Dict[str, Any]:
 
     # Get the project root directory
     root_dir = Path(__file__).resolve().parent.parent
-    
-    # Define path to global config
-    config_path = root_dir / "config/global.json"
 
-    # Check if config file exists and create default if it doesn't
-    if not config_path.exists():
-        default_config = {
-            "discord_webhook": "",
-            "check_interval": 60,
-            "use_proxies": True,
-            "gui_enabled": False,
-            "debug": {
-                "verbose": False,
-                "log_level": "INFO"
+    # Define possible config paths with preference order
+    config_paths = [
+        root_dir / "config/global.json",
+        root_dir / "config/config.json",
+        root_dir / "config.json"
+    ]
+
+    # Try each path until we find a config file
+    for config_path in config_paths:
+        if config_path.exists():
+            try:
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+                    logger.debug(f"Loaded global config from {config_path}")
+                    return config
+            except Exception as e:
+                logger.error(f"Error loading global config from {config_path}: {str(e)}")
+
+    # Return default configuration if no file found
+    default_config = {
+        "discord_webhook": "",
+        "check_interval": 60,
+        "use_proxies": True,
+        "gui_enabled": False,
+        "modules": {
+            "booksamillion": {
+                "enabled": True,
+                "interval": 300
             }
         }
+    }
 
-        try:
-            with open(config_path, "w") as f:
-                json.dump(default_config, f, indent=2)
-            logger.info("Created default global config")
-        except Exception as e:
-            logger.error(f"Error creating default global config: {str(e)}")
-            return default_config
+    logger.warning("No global configuration found, using defaults")
+    return default_config
 
-    # Load config
-    try:
-        with open(config_path, "r") as f:
-            config = json.load(f)
-            logger.info("Loaded global config")
-            return config
-    except Exception as e:
-        logger.error(f"Error loading global config: {str(e)}")
-        return {}
+
+if __name__ == "__main__":
+    # Set up logging for testing
+    logging.basicConfig(level=logging.DEBUG)
+
+    # Test loading module config
+    config = load_module_config("booksamillion")
+    print("Module config:", json.dumps(config, indent=2) if config else "Not found")
+
+    # Test loading global config
+    global_config = load_global_config()
+    print("Global config:", json.dumps(global_config, indent=2))

@@ -1,244 +1,287 @@
 #!/usr/bin/env python3
 """
-Books-A-Million Module
-Checks stock of items on booksamillion.com
+Optimized Books-A-Million Module
+Checks stock of Pokemon products on booksamillion.com
 """
 
+import os
+import sys
 import json
 import re
 import time
 import logging
-import os
-from datetime import datetime
-from typing import Dict, List, Optional, Any
-from pathlib import Path
 import random
+from datetime import datetime
+from typing import Dict, List, Optional, Any, Tuple
+from pathlib import Path
+
+# Add project root to path to fix import issues
+sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
+
 import requests
-import urllib.parse
 
-from utils.cloudflare_bypass import CloudflareBypass
-from utils.headers_generator import generate_chrome_headers
-from utils.config_loader import load_module_config, load_module_targets, update_pid_list
-from utils.database_manager import get_database
+# Create utils/__init__.py if it doesn't exist
+utils_init = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'utils', '__init__.py')
+if not os.path.exists(utils_init):
+    os.makedirs(os.path.dirname(utils_init), exist_ok=True)
+    with open(utils_init, 'w') as f:
+        f.write("# This file makes the directory a Python package\n")
 
-# Configure module logger to use main logger
+try:
+    from utils.cloudflare_bypass import CloudflareBypass, get_cloudflare_bypass
+except ImportError:
+    # If import fails, create a simple version for compatibility
+    class CloudflareBypass:
+        def __init__(self, cookie_file, base_url, target_page):
+            self.session = requests.Session()
+
+        def get(self, url, **kwargs):
+            return self.session.get(url, **kwargs)
+
+        def post(self, url, **kwargs):
+            return self.session.post(url, **kwargs)
+
+        def refresh_session(self):
+            self.session = requests.Session()
+
+        def set_logging(self, enable_logging=True, save_readable=False):
+            pass
+
+
+    def get_cloudflare_bypass(base_url, cookie_file=None):
+        return CloudflareBypass(cookie_file="", base_url=base_url, target_page="/")
+
+try:
+    from utils.config_loader import load_module_config
+except ImportError:
+    # If import fails, create a simple config loader
+    def load_module_config(module_name):
+        """Simplified config loader"""
+        # Try to load from different possible locations
+        config_paths = [
+            f"config/modules/{module_name}.json",
+            f"config/{module_name}.json",
+            f"config_modules_{module_name}.json",
+            f"config_{module_name}.json"
+        ]
+
+        for path in config_paths:
+            try:
+                if os.path.exists(path):
+                    with open(path, 'r') as f:
+                        return json.load(f)
+            except Exception:
+                pass
+
+        # Return default config if none found
+        return {
+            "name": "Books-A-Million",
+            "enabled": True,
+            "interval": 300,
+            "search_radius": 250,
+            "target_zipcode": "30135",
+            "cookie_file": "data/booksamillion_cookies.json",
+            "search_urls": [],
+            "pids": ["F820650412493", "F820650413315"]
+        }
+
+# Configure module logger
 logger = logging.getLogger("Booksamillion")
 
 
 class Booksamillion:
     """
-    Module for checking stock on booksamillion.com
+    Module for checking Pokemon product stock on booksamillion.com
     """
 
-    # Module metadata
+    # Module metadata (used by the dispatcher)
     NAME = "Books-A-Million"
-    VERSION = "1.2.0"  # Updated version for database integration
-    INTERVAL = 300  # Default check interval in seconds
+    VERSION = "2.1.0"
+    INTERVAL = 300  # Default to 5 minutes
 
     def __init__(self):
-        """Initialize the Books-A-Million module"""
-        # Default configuration
-        self.config = {
-            "timeout": 30,
-            "retry_attempts": 5,
-            "search_radius": 250,  # Miles
-            "target_zipcode": "30135",  # Default zip
-            "cookie_file": "data/booksamillion_cookies.json",
-            "product_db_file": "data/booksamillion_products.json",
-            "max_backoff_time": 60  # Maximum backoff time in seconds
-        }
-
-        # Load module-specific config
-        module_config = load_module_config("booksamillion")
-        if module_config:
-            self.config.update(module_config)
-            logger.info("Loaded module-specific configuration")
-
-        # Load target configurations (URLs, PIDs, keywords)
-        targets = load_module_targets("booksamillion")
-        self.search_urls = targets.get("search_urls", [])
-        self.item_urls = targets.get("item_urls", [])
-        self.pids = targets.get("pids", [])
-        self.keywords = targets.get("keywords", ["exclusive", "limited edition", "signed", "pokemon"])
-
-        logger.info(f"Loaded {len(self.search_urls)} search URLs, {len(self.item_urls)} item URLs, "
-                    f"{len(self.pids)} PIDs, and {len(self.keywords)} keywords")
+        """Initialize the Books-A-Million module with configuration"""
+        # Load configuration
+        self.config = self._load_config()
 
         # Ensure data directory exists
-        data_dir = Path("data")
-        if not data_dir.exists():
-            data_dir.mkdir()
+        os.makedirs("data", exist_ok=True)
+        os.makedirs("logs", exist_ok=True)
+        os.makedirs("logs/requests", exist_ok=True)
 
         # Initialize CloudflareBypass handler
-        self.cf_bypass = CloudflareBypass(
-            cookie_file=self.config["cookie_file"],
+        self.cf_bypass = get_cloudflare_bypass(
             base_url="https://www.booksamillion.com",
-            target_page="/"
+            cookie_file=self.config.get("cookie_file", "data/booksamillion_cookies.json"),
+            cookie_max_age=3600  # Keep cookies valid for 1 hour
         )
 
-        # Create session from the CloudflareBypass
+        # Configure logging behavior
+        self.cf_bypass.set_logging(
+            enable_logging=self.config.get("debug", {}).get("log_requests", True),
+            save_readable=self.config.get("debug", {}).get("save_html", False)
+        )
+
+        # Create session
         self.session = self.cf_bypass.create_session()
 
-        # Initialize the database connection
-        self.db = get_database()
-
-        # Load products cache
+        # Load product data
         self.products = self._load_products()
 
+        # Track last stock check time for each product
+        self.last_check = {}
+
+        # Store information about stock changes
+        self.stock_changes = {}
+
+        logger.info(f"Initialized {self.NAME} module v{self.VERSION}")
+        logger.info(f"Loaded {len(self.products)} products from cache")
+        logger.info(
+            f"Configured for zip code {self.config.get('target_zipcode')} with radius {self.config.get('search_radius')}mi")
+
+    def _load_config(self) -> Dict[str, Any]:
+        """Load module configuration"""
+        config = load_module_config("booksamillion")
+
+        if not config:
+            # Default configuration if none found
+            config = {
+                "name": "Books-A-Million",
+                "enabled": True,
+                "interval": 300,
+                "timeout": 30,
+                "retry_attempts": 3,
+                "search_radius": 250,
+                "target_zipcode": "30135",
+                "bypass_method": "cloudscraper",
+                "cookie_file": "data/booksamillion_cookies.json",
+                "product_db_file": "data/booksamillion_products.json",
+                "search_urls": [
+                    "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date",
+                    "https://www.booksamillion.com/search2?query=pokemon%20cards&filters%5Bcategory%5D=Toys&sort_by=release_date"
+                ],
+                "pids": [
+                    "F820650412493",
+                    "F820650413315",
+                    "F820650859007"
+                ],
+                "keywords": [
+                    "pokemon",
+                    "limited edition"
+                ],
+                "debug": {
+                    "log_requests": True,
+                    "save_html": False
+                }
+            }
+            logger.warning("No configuration found, using defaults")
+
+            # Try to save default config
+            try:
+                os.makedirs("config/modules", exist_ok=True)
+                with open("config/modules/booksamillion.json", "w") as f:
+                    json.dump(config, f, indent=2)
+                logger.info("Created default config file")
+            except Exception as e:
+                logger.error(f"Error creating default config: {str(e)}")
+
+        return config
+
     def _load_products(self) -> Dict[str, Dict]:
-        """
-        Load product database from database or fallback to file
+        """Load product cache"""
+        product_db_file = self.config.get("product_db_file", "data/booksamillion_products.json")
 
-        Returns:
-            Dict of products indexed by PID
-        """
-        products = {}
+        if os.path.exists(product_db_file):
+            try:
+                with open(product_db_file, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Error loading products from file: {str(e)}")
 
-        try:
-            # First try to load from database
-            db_products = self.db.get_products_by_module("booksamillion", limit=1000)
-
-            if db_products:
-                logger.info(f"Loaded {len(db_products)} products from database")
-
-                # Convert list to dictionary keyed by PID
-                for product in db_products:
-                    products[product["pid"]] = product
-
-                return products
-
-            # If database is empty or disabled, try file as fallback
-            product_file = Path(self.config["product_db_file"])
-            if product_file.exists():
-                try:
-                    with open(product_file, 'r') as f:
-                        file_products = json.load(f)
-
-                    logger.info(f"Loaded {len(file_products)} products from file")
-
-                    # If we loaded from file, migrate to database
-                    if file_products:
-                        self._migrate_products_to_db(file_products)
-
-                    return file_products
-                except Exception as e:
-                    logger.error(f"Error loading product database file: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error loading products from database: {str(e)}")
-
-        # If we get here, either no products or error
         return {}
 
-    def _migrate_products_to_db(self, products: Dict[str, Dict]):
-        """
-        Migrate products from file storage to database
+    def _save_products(self):
+        """Save products to cache file"""
+        product_db_file = self.config.get("product_db_file", "data/booksamillion_products.json")
 
-        Args:
-            products: Dictionary of products indexed by PID
-        """
         try:
-            batch_products = []
-
-            for pid, product in products.items():
-                # Prepare product for database
-                db_product = {
-                    "pid": pid,
-                    "title": product.get("title", ""),
-                    "price": product.get("price", ""),
-                    "url": product.get("url", ""),
-                    "image_url": product.get("image", ""),
-                    "in_stock": product.get("in_stock", False),
-                    "module": "booksamillion",
-                    "data": product  # Store full product data
-                }
-
-                batch_products.append(db_product)
-
-            # Batch insert into database
-            if batch_products:
-                success, failures = self.db.batch_add_products(batch_products)
-                logger.info(f"Migrated {success} products to database, {failures} failures")
+            with open(product_db_file, 'w') as f:
+                json.dump(self.products, f, indent=2)
+            logger.debug(f"Saved {len(self.products)} products to cache")
         except Exception as e:
-            logger.error(f"Error migrating products to database: {str(e)}")
-
-    def refresh_session(self):
-        """Refresh the session with new cookies and headers"""
-        # Get fresh cookies
-        self.cf_bypass.get_fresh_cookies()
-
-        # Create a new session with the fresh cookies
-        self.session = self.cf_bypass.create_session()
-
-        logger.info("Refreshed session with new cookies and headers")
+            logger.error(f"Error saving products to file: {str(e)}")
 
     def check_stock(self, pid: str = None, proxy: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
-        Check stock availability for a specific PID or all configured PIDs
+        Check stock availability for products
 
         Args:
-            pid: Product ID to check (optional)
+            pid: Specific product ID to check (optional)
             proxy: Optional proxy configuration
 
         Returns:
-            List of dictionaries with product and stock information
+            List of product results with stock information
         """
         results = []
 
-        # If no PID is specified, check all configured PIDs
-        if pid is None:
-            logger.info("No PID specified, checking configured PIDs")
+        # Determine which PIDs to check
+        if pid:
+            # Check specific PID
+            pids_to_check = [pid]
+        else:
+            # Get PIDs from configuration
+            pids_to_check = self.config.get("pids", [])
 
-            # Check PIDs from configuration
-            pids_to_check = self.pids
+            # Add any PIDs from the product cache that aren't in the config
+            for product_pid in self.products.keys():
+                if product_pid not in pids_to_check:
+                    pids_to_check.append(product_pid)
 
-            # If no configured PIDs, extract from item URLs
-            if not pids_to_check and self.item_urls:
-                for url in self.item_urls:
-                    # Extract PID from URL
-                    pid_match = re.search(r'/([A-Za-z0-9]+), url)
-                    if pid_match:
-                        pids_to_check.append(pid_match.group(1))
+            if not pids_to_check:
+                logger.warning("No PIDs configured to check")
+                return results
 
-                    # If still no PIDs, check some from the product database
-                    if not pids_to_check and self.products:
-                        pids_to_check = list(self.products.keys())[:10]  # Limit to 10
+        # Check stock for each PID
+        for current_pid in pids_to_check:
+            try:
+                # Add small delay between checks
+                if results:  # Not the first request
+                    time.sleep(random.uniform(1.5, 3.0))
 
-                    # Check each PID
-                    if pids_to_check:
-                        logger.info(f"Checking {len(pids_to_check)} PIDs")
-                    for pid_to_check in pids_to_check:
-                        result = self._check_single_stock(pid_to_check, proxy)
+                # Check stock for this PID
+                result = self._check_single_stock(current_pid, proxy)
+
+                if result:
                     results.append(result)
-                    # Small delay between checks
-                    time.sleep(random.uniform(1.0, 2.0))
-                    else:
-                    logger.warning("No PIDs configured to check")
+                    # Update last check time
+                    self.last_check[current_pid] = time.time()
+            except Exception as e:
+                logger.error(f"Error checking stock for {current_pid}: {str(e)}")
 
-                    else:
-                    # Check the specified PID
-                    result = self._check_single_stock(pid, proxy)
-                    results.append(result)
+        # Save updated product data
+        self._save_products()
 
+        logger.info(f"Completed stock check for {len(results)} products")
         return results
 
     def _check_single_stock(self, pid: str, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """
-        Internal method to check stock for a single PID
+        Check stock for a single product
 
         Args:
-            pid: Product ID to check
+            pid: Product ID
             proxy: Optional proxy configuration
 
         Returns:
-            Dictionary with product and stock information
+            Dictionary with stock information
         """
-        logger.info(f"Checking stock for PID: {pid}")
+        logger.info(f"Checking stock for {pid}")
 
-        # Set up proxies if provided
-        if proxy:
+        # Setup proxy if provided
+        if proxy and isinstance(proxy, dict) and proxy.get('http'):
             self.session.proxies.update(proxy)
 
-        # Setup result template
+        # Initialize result template
         result = {
             "pid": pid,
             "title": "",
@@ -247,16 +290,18 @@ class Booksamillion:
             "image": "",
             "in_stock": False,
             "stores": [],
-            "check_time": datetime.now().isoformat(),
-            "search_radius": self.config["search_radius"],
-            "zipcode": self.config["target_zipcode"]
+            "check_time": datetime.now().isoformat()
         }
 
-        # Build the URL for stock check
-        bullseye_url = (
+        # Get zip code and radius from config - use defaults if not specified
+        zipcode = self.config.get("target_zipcode", "30135")
+        radius = self.config.get("search_radius", 250)
+
+        # Build store inventory URL with proper zipcode and radius
+        inventory_url = (
             f"https://www.booksamillion.com/bullseye"
-            f"?PostalCode={self.config['target_zipcode']}"
-            f"&Radius={self.config['search_radius']}"
+            f"?PostalCode={zipcode}"
+            f"&Radius={radius}"
             f"&action=bullseye"
             f"&pid={pid}"
             f"&code="
@@ -264,10 +309,10 @@ class Booksamillion:
             f"&PageSize=25"
         )
 
-        # Create the product page URL for referer
+        # Get product page URL for referrer
         product_url = f"https://www.booksamillion.com/p/{pid}"
 
-        # Add the required headers based on successful request
+        # Create headers for the request
         headers = {
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -275,98 +320,103 @@ class Booksamillion:
             "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
-            "sec-ch-ua-bitness": "64",
-            "sec-ch-ua-arch": "x86",
-            "sec-ch-ua-full-version": "135.0.7049.115",
             "Sec-Fetch-Site": "same-origin",
             "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Dest": "empty",
-            "DNT": "1"
+            "Sec-Fetch-Dest": "empty"
         }
 
-        # Attempt the request with retries and exponential backoff
-        response = None
-        max_retries = self.config["retry_attempts"]
-        max_backoff = self.config["max_backoff_time"]
+        # Make request with retry mechanism
+        max_retries = self.config.get("retry_attempts", 3)
+        backoff_base = 1.5
 
         for attempt in range(max_retries):
             try:
-                # Make the request with our bypass utility
+                logger.debug(f"Attempt {attempt + 1}/{max_retries} for {pid}")
+
+                # Make the request
                 response = self.cf_bypass.get(
-                    bullseye_url,
+                    inventory_url,
                     headers=headers,
-                    timeout=self.config["timeout"],
-                    max_retries=2  # Internal retries for Cloudflare issues
+                    timeout=self.config.get("timeout", 30)
                 )
 
-                # If we get a successful response, break the retry loop
                 if response.status_code == 200:
-                    logger.info(f"Got successful response on attempt {attempt + 1}")
                     break
-                else:
-                    logger.warning(f"Got HTTP {response.status_code} on attempt {attempt + 1}")
 
-                # Calculate backoff time with jitter, capped at max_backoff
-                backoff_seconds = min(max_backoff, 1.5 * (2 ** attempt) * (0.8 + 0.4 * random.random()))
-                time.sleep(backoff_seconds)
+                logger.warning(f"Got status code {response.status_code} on attempt {attempt + 1}")
 
-                # Refresh session for next attempt
-                self.refresh_session()
+                # Refresh session if we hit a cloudflare challenge
+                if "challenge" in response.text.lower() or response.status_code == 403:
+                    logger.info("Refreshing cookies due to Cloudflare challenge")
+                    self.cf_bypass.refresh_session()
+
+                # Calculate backoff with jitter
+                wait_time = backoff_base * (2 ** attempt) * (0.75 + 0.5 * random.random())
+                time.sleep(min(wait_time, 30))  # Cap at 30 seconds
 
             except Exception as e:
                 logger.error(f"Request error on attempt {attempt + 1}: {str(e)}")
 
-                # Calculate backoff time with jitter, capped at max_backoff
-                backoff_seconds = min(max_backoff, 1.5 * (2 ** attempt) * (0.8 + 0.4 * random.random()))
-                time.sleep(backoff_seconds)
+                # Exponential backoff with jitter
+                wait_time = backoff_base * (2 ** attempt) * (0.75 + 0.5 * random.random())
+                time.sleep(min(wait_time, 30))
 
-                # Refresh session for next attempt
-                self.refresh_session()
+                # Refresh session before next attempt
+                self.cf_bypass.refresh_session()
 
-        # Check if we got a valid response
-        if not response or response.status_code != 200:
-            logger.error(f"Failed to check stock for {pid} after {max_retries} attempts")
-            return result
+                # On last attempt, return the empty result
+                if attempt == max_retries - 1:
+                    return result
 
-        # Parse the response, handling different content types
+        # Process response
         try:
-            # Try direct JSON parsing first
+            # Try to parse JSON
             try:
                 stock_data = response.json()
             except:
-                # If direct parsing fails, try to extract JSON from the HTML
-                # Look for a JSON object that starts with {"userinfo":
-                json_match = re.search(r'({"userinfo":.*})', response.text)
+                # Try to extract JSON from HTML
+                json_match = re.search(r'({"userinfo":.*?})', response.text, re.DOTALL)
                 if json_match:
                     json_text = json_match.group(1)
                     stock_data = json.loads(json_text)
                 else:
-                    # Look for any object with pidinfo
-                    json_match = re.search(r'({"pidinfo":.*})', response.text)
+                    # Try alternate pattern
+                    json_match = re.search(r'({"pidinfo":.*?})', response.text, re.DOTALL)
                     if json_match:
                         json_text = json_match.group(1)
                         stock_data = json.loads(json_text)
                     else:
-                        logger.error("Could not find any valid JSON in the response")
-                        return result
+                        json_match = re.search(r'({"Error":[0-9]+,"ErrorText":".*?"})', response.text, re.DOTALL)
+                        if json_match:
+                            json_text = json_match.group(1)
+                            stock_data = json.loads(json_text)
+                            if "ErrorText" in stock_data:
+                                logger.warning(f"Error from API: {stock_data['ErrorText']}")
+                        else:
+                            logger.error(f"Could not find JSON data in response for {pid}")
+                            return result
 
-            # Extract product details from pidinfo
+            # Check for API error
+            if "Error" in stock_data and stock_data.get("Error") != 0:
+                logger.warning(f"API Error: {stock_data.get('ErrorText', 'Unknown error')}")
+                # Continue to extract product details if available
+
+            # Extract product details
             if 'pidinfo' in stock_data:
                 result["title"] = stock_data['pidinfo'].get('title', '')
                 result["price"] = stock_data['pidinfo'].get('retail_price', '')
                 result["url"] = stock_data['pidinfo'].get('td_url', '')
                 result["image"] = stock_data['pidinfo'].get('image_url', '')
+                logger.info(f"Found product: {result['title']}")
 
-                logger.info(f"Extracted product details: {result['title']}")
-
-            # Extract store availability from ResultList
-            if 'ResultList' in stock_data:
+            # Check store availability
+            if 'ResultList' in stock_data and stock_data['ResultList']:
                 stores_count = len(stock_data['ResultList'])
                 in_stock_count = 0
 
                 for store in stock_data['ResultList']:
-                    availability = store.get('Availability', '')
-                    if availability.upper() == 'IN STOCK':
+                    availability = store.get('Availability', '').upper()
+                    if availability == 'IN STOCK':
                         result["in_stock"] = True
                         in_stock_count += 1
 
@@ -380,292 +430,439 @@ class Booksamillion:
                             "zip": store.get('PostCode', ''),
                             "phone": store.get('PhoneNumber', ''),
                             "distance": store.get('Distance', ''),
-                            "hours": store.get('BusinessHours', ''),
-                            "module": "booksamillion"  # Added for database compatibility
+                            "quantity": store.get('ShowQty', ''),  # Stock quantity if available
                         }
 
                         result["stores"].append(store_info)
 
-                logger.info(f"Found {stores_count} stores, {in_stock_count} have stock")
+                logger.info(f"Found {in_stock_count} of {stores_count} stores with stock for {pid}")
 
-            logger.info(f"Stock check for {pid} complete: {'IN STOCK' if result['in_stock'] else 'OUT OF STOCK'}")
-
-            # Update product database with results
-            self._update_product_db(result)
+            # Update product information
+            self._update_product(result)
 
             return result
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON response for {pid}: {str(e)}")
-            return result
         except Exception as e:
-            logger.error(f"Error processing stock data for {pid}: {str(e)}")
+            logger.error(f"Error processing response for {pid}: {str(e)}")
             return result
 
-    def scan_new_items(self, proxy: Optional[Dict[str, str]] = None) -> List[str]:
+    def _update_product(self, result: Dict[str, Any]) -> bool:
         """
-        Scan search pages for new items
+        Update product information and detect stock changes
+
+        Args:
+            result: Product result with stock information
+
+        Returns:
+            bool: True if stock status changed, False otherwise
+        """
+        pid = result["pid"]
+        in_stock = result["in_stock"]
+        current_time = datetime.now().isoformat()
+
+        # Check if this is a new product
+        is_new = pid not in self.products
+
+        # Get previous stock status to detect changes
+        stock_changed = False
+
+        if not is_new:
+            previous_status = self.products[pid].get("in_stock", False)
+            stock_changed = previous_status != in_stock
+
+            if stock_changed:
+                logger.info(f"Stock status changed for {pid}: {previous_status} -> {in_stock}")
+
+                # Store change information for notification
+                self.stock_changes[pid] = {
+                    "pid": pid,
+                    "title": result["title"],
+                    "price": result["price"],
+                    "url": result["url"],
+                    "image": result["image"],
+                    "in_stock": in_stock,
+                    "previous_status": previous_status,
+                    "change_time": current_time,
+                    "stores": result["stores"] if in_stock else []
+                }
+
+        # Update or add product in cache
+        self.products[pid] = {
+            "pid": pid,
+            "title": result["title"] or self.products.get(pid, {}).get("title", ""),
+            "price": result["price"] or self.products.get(pid, {}).get("price", ""),
+            "url": result["url"] or self.products.get(pid, {}).get("url", ""),
+            "image": result["image"] or self.products.get(pid, {}).get("image", ""),
+            "in_stock": in_stock,
+            "first_seen": self.products.get(pid, {}).get("first_seen", current_time),
+            "last_check": current_time,
+            "last_in_stock": current_time if in_stock else self.products.get(pid, {}).get("last_in_stock"),
+            "last_out_of_stock": current_time if not in_stock else self.products.get(pid, {}).get("last_out_of_stock"),
+            "stores": result["stores"] if in_stock else []
+        }
+
+        return is_new or stock_changed
+
+    def scan_new_items(self, proxy: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+        """
+        Scan search pages for new Pokemon products
 
         Args:
             proxy: Optional proxy configuration
 
         Returns:
-            List of new PIDs found
+            List of new products found
         """
-        logger.info("Scanning for new items...")
+        logger.info("Scanning for new Pokemon products")
 
-        # Set up proxies if provided
-        if proxy:
+        # Setup proxy if provided
+        if proxy and isinstance(proxy, dict) and proxy.get('http'):
             self.session.proxies.update(proxy)
 
-        new_pids = []
+        new_products = []
+        search_urls = self.config.get("search_urls", [])
 
-        # Process each search URL
-        for url in self.search_urls:
-            logger.info(f"Scanning URL: {url}")
+        for url_index, url in enumerate(search_urls):
+            logger.info(f"Scanning URL {url_index + 1}/{len(search_urls)}: {url}")
 
-            # Use the Cloudflare bypass utility for the request
             try:
+                # Add delay between requests
+                if url_index > 0:
+                    time.sleep(random.uniform(2.0, 4.0))
+
+                # Fetch search page
                 response = self.cf_bypass.get(
                     url,
-                    timeout=self.config["timeout"],
-                    max_retries=3
+                    timeout=self.config.get("timeout", 30)
                 )
 
-                # Parse the HTML to find product PIDs
-                if response.status_code == 200:
-                    html = response.text
+                if response.status_code != 200:
+                    logger.warning(f"Got status code {response.status_code} for {url}")
+                    continue
 
-                    # Extract PIDs using regex pattern matching
-                    # Looking for patterns like: pid=F820650412493 or pid=9798400902550
-                    pid_pattern = r'pid=([A-Za-z0-9]+)'
-                    pids = re.findall(pid_pattern, html)
+                # Extract product information
+                products = self._extract_products_from_html(response.text, url)
 
-                    # Clean up the PIDs (remove duplicates)
-                    pids = list(set(pids))
+                for product in products:
+                    pid = product.get("pid")
 
-                    logger.info(f"Found {len(pids)} PIDs on page")
+                    # Skip if no PID or already in database
+                    if not pid or pid in self.products:
+                        continue
 
-                    # Check which PIDs are new
-                    for pid in pids:
-                        if pid not in self.products and pid not in self.pids:
-                            logger.info(f"Found new PID: {pid}")
-                            new_pids.append(pid)
+                    logger.info(f"Found new product: {product.get('title')} (PID: {pid})")
 
-                            # Add to the PIDs list
-                            self.pids.append(pid)
-                else:
-                    logger.warning(f"Failed to scan URL {url}: HTTP {response.status_code}")
+                    # Add to the products dictionary
+                    current_time = datetime.now().isoformat()
+                    self.products[pid] = {
+                        "pid": pid,
+                        "title": product.get("title", ""),
+                        "price": product.get("price", ""),
+                        "url": product.get("url", ""),
+                        "image": product.get("image", ""),
+                        "in_stock": False,  # Will be updated after stock check
+                        "first_seen": current_time,
+                        "last_check": current_time
+                    }
+
+                    # Add to new products list
+                    new_products.append(product)
+
             except Exception as e:
                 logger.error(f"Error scanning URL {url}: {str(e)}")
 
-            # Delay between requests to avoid rate limiting
-            time.sleep(random.uniform(2.0, 4.0))
+        logger.info(f"Found {len(new_products)} new products")
 
-        # If new PIDs were found, update the PID list in the configuration
-        if new_pids:
+        # Save updated product data
+        if new_products:
+            self._save_products()
+
+        # Check stock for new products
+        for product in new_products:
             try:
-                update_pid_list("booksamillion", new_pids)
-                logger.info(f"Updated PID list with {len(new_pids)} new PIDs")
+                # Add small delay between checks
+                time.sleep(random.uniform(1.0, 2.0))
+
+                # Check stock
+                self._check_single_stock(product["pid"], proxy)
+
             except Exception as e:
-                logger.error(f"Error updating PID list: {str(e)}")
+                logger.error(f"Error checking stock for new product {product.get('pid')}: {str(e)}")
 
-        logger.info(f"Scan complete. Found {len(new_pids)} new PIDs")
-        return new_pids
+        return new_products
 
-    def _update_product_db(self, result: Dict[str, Any]):
+    def _extract_products_from_html(self, html: str, base_url: str) -> List[Dict[str, Any]]:
         """
-        Update the product database with new stock check results
+        Extract product information from HTML
 
         Args:
-            result: Stock check result dictionary
+            html: HTML content
+            base_url: Base URL for resolving relative URLs
 
         Returns:
-            bool: True if stock status changed or new product, False otherwise
+            List of extracted products
         """
-        pid = result["pid"]
-        current_time = datetime.now().isoformat()
-        in_stock = result["in_stock"]
+        products = []
 
-        # Check if this is a new product in our cache
-        is_new = pid not in self.products
+        try:
+            # Extract product blocks
+            product_blocks = re.findall(r'<div class="search-result-item".*?</div>\s*</div>\s*</div>', html, re.DOTALL)
 
-        # If new product, initialize its entry in our local cache
+            for block in product_blocks:
+                # Extract PID
+                pid_match = re.search(r'pid=([A-Za-z0-9]+)', block) or re.search(r'/([A-Za-z0-9]+)"', block)
+
+                if not pid_match:
+                    continue
+
+                pid = pid_match.group(1)
+
+                # Extract title
+                title_match = re.search(r'<div class="search-item-title">\s*<a[^>]*>(.*?)</a>', block, re.DOTALL)
+                title = title_match.group(1).strip() if title_match else ""
+
+                # Check if title contains "pokemon" (case insensitive)
+                keywords = self.config.get("keywords", ["pokemon"])
+                if not any(kw.lower() in title.lower() for kw in keywords):
+                    continue
+
+                # Extract URL
+                url_match = re.search(r'<a href="([^"]+)"[^>]*>.*?</a>', block)
+                url = url_match.group(1) if url_match else ""
+
+                # Make URL absolute
+                if url and not url.startswith(('http://', 'https://')):
+                    url = f"https://www.booksamillion.com{url}" if not url.startswith(
+                        '/') else f"https://www.booksamillion.com{url}"
+
+                # Extract price
+                price_match = re.search(r'<span class="our-price">\s*\$([\d\.]+)', block)
+                price = price_match.group(1) if price_match else ""
+
+                # Extract image
+                image_match = re.search(r'<img src="([^"]+)"', block)
+                image = image_match.group(1) if image_match else ""
+
+                # Make image URL absolute
+                if image and not image.startswith(('http://', 'https://')):
+                    image = f"https://www.booksamillion.com{image}" if not image.startswith(
+                        '/') else f"https://www.booksamillion.com{image}"
+
+                # Create product entry
+                product = {
+                    "pid": pid,
+                    "title": title,
+                    "url": url,
+                    "price": price,
+                    "image": image
+                }
+
+                products.append(product)
+
+            logger.info(f"Extracted {len(products)} Pokemon products from page")
+
+        except Exception as e:
+            logger.error(f"Error extracting products from HTML: {str(e)}")
+
+        return products
+
+    def format_discord_message(self, product: Dict[str, Any], is_new: bool = False) -> Dict[str, Any]:
+        """
+        Format product information for Discord webhook
+
+        Args:
+            product: Product information
+            is_new: Whether this is a new product notification
+
+        Returns:
+            Formatted Discord message
+        """
+        # Determine title prefix based on notification type
         if is_new:
-            self.products[pid] = {
-                "pid": pid,
-                "title": result["title"],
-                "price": result["price"],
-                "url": result["url"],
-                "image": result["image"],
-                "first_seen": current_time,
-                "last_check": current_time,
-                "in_stock": in_stock,
-                "last_in_stock": current_time if in_stock else None,
-                "last_out_of_stock": current_time if not in_stock else None,
-                "stores": result["stores"] if in_stock else []
-            }
+            title = f"New Item: {product.get('title', 'Unknown Product')}"
+        elif product.get('in_stock', False):
+            title = f"🟢 IN STOCK: {product.get('title', 'Unknown Product')}"
         else:
-            # Update existing product in our local cache
-            product = self.products[pid]
+            title = f"🔴 OUT OF STOCK: {product.get('title', 'Unknown Product')}"
 
-            # Update basic info
-            product["title"] = result["title"] or product["title"]
-            product["price"] = result["price"] or product["price"]
-            product["url"] = result["url"] or product["url"]
-            product["image"] = result["image"] or product["image"]
-            product["last_check"] = current_time
+        # Build description
+        description = []
 
-            # Check for stock status change
-            stock_changed = product["in_stock"] != in_stock
-            product["in_stock"] = in_stock
+        if is_new:
+            description.append(f"A new Pokemon product has been added to Books-A-Million!")
 
-            if in_stock:
-                product["last_in_stock"] = current_time
-                product["stores"] = result["stores"]
-            else:
-                product["last_out_of_stock"] = current_time
-                product["stores"] = []
+        if product.get('price'):
+            description.append(f"Price: ${product.get('price')}")
 
-        # Update the database with the new information
-        try:
-            # Prepare the product data for database
-            db_product = {
-                "pid": pid,
-                "title": result["title"],
-                "price": result["price"],
-                "url": result["url"],
-                "image_url": result["image"],
-                "in_stock": in_stock,
-                "module": "booksamillion",
-                "data": self.products[pid]  # Store full product data
+        # Add SKU/PID
+        description.append(f"SKU: {product.get('pid')}")
+
+        # Add search term if it's a new product
+        if is_new:
+            description.append(f"Search Term: pokemon")
+
+        # Add store information for in-stock products
+        if product.get('in_stock', False) and product.get('stores'):
+            description.append("\n**Available at these stores:**")
+
+            for store in product.get('stores')[:5]:  # Limit to 5 stores to avoid too long message
+                store_line = f"• {store.get('name', '')}: {store.get('address', '')}, {store.get('city', '')}, {store.get('state', '')} {store.get('zip', '')}"
+                if store.get('quantity'):
+                    store_line += f" (Qty: {store.get('quantity')})"
+                description.append(store_line)
+
+            if len(product.get('stores', [])) > 5:
+                description.append(f"...and {len(product.get('stores', [])) - 5} more stores")
+
+        # Add links
+        links = [
+            f"[eBay](https://www.ebay.com/sch/i.html?_nkw={product.get('pid')})",
+            f"[Amazon](https://www.amazon.com/s?k={product.get('pid')})",
+            f"[Walmart](https://www.walmart.com/search/?query={product.get('pid')})",
+            f"[Keepa](https://keepa.com/#!search/amazon-{product.get('pid')})",
+            f"[SellerAmp](https://selleramp.com/search?query={product.get('pid')})",
+            f"[Google](https://www.google.com/search?q={product.get('pid')})"
+        ]
+
+        description.append("\n**Links:**")
+        description.append(" - ".join(links))
+
+        # Create embed
+        embed = {
+            "title": title,
+            "description": "\n".join(description),
+            "color": 5814783 if product.get('in_stock', False) else 15158332,
+            # Green for in stock, red for out of stock
+            "url": product.get('url', ''),
+            "timestamp": datetime.now().isoformat(),
+            "footer": {
+                "text": "FastBreakCards Monitors • Books a million • " + datetime.now().strftime("%I:%M:%S %p EST")
+            }
+        }
+
+        # Add thumbnail if image URL available
+        if product.get('image'):
+            embed["thumbnail"] = {
+                "url": product.get('image')
             }
 
-            # Add to database
-            self.db.add_product(db_product)
+        return {
+            "username": "FastBreakCards Monitors",
+            "embeds": [embed]
+        }
 
-            # If the product is in stock, update store availability
-            if in_stock and result["stores"]:
-                self.db.update_stock_status(pid, in_stock, result["stores"])
-            else:
-                self.db.update_stock_status(pid, in_stock)
+    def send_discord_notification(self, product: Dict[str, Any], is_new: bool = False) -> bool:
+        """
+        Send Discord notification for product
 
-            # Compatibility: Still save to file as backup
-            self._save_products_to_file()
+        Args:
+            product: Product information
+            is_new: Whether this is a new product notification
 
-            # Return whether this is a new product or stock changed
-            return is_new or (not is_new and stock_changed)
+        Returns:
+            bool: True if notification sent successfully
+        """
+        # First check webhook from config
+        webhook_url = self.config.get("webhook", {}).get("url", "")
 
-        except Exception as e:
-            logger.error(f"Error updating product in database: {str(e)}")
+        # Then check discord_webhook from main config
+        if not webhook_url:
+            webhook_url = self.config.get("discord_webhook", "")
 
-            # Fallback to file storage if database fails
-            self._save_products_to_file()
+        if not webhook_url:
+            logger.warning("No Discord webhook URL configured")
+            return False
 
-            # Still return the status
-            return is_new or (not is_new and in_stock != self.products[pid].get("in_stock", False))
+        # Format message
+        message = self.format_discord_message(product, is_new)
 
-    def _save_products_to_file(self):
-        """Save product database to file as backup"""
         try:
-            product_file = Path(self.config["product_db_file"])
-            with open(product_file, 'w') as f:
-                json.dump(self.products, f, indent=2)
+            # Send webhook
+            response = requests.post(
+                webhook_url,
+                json=message,
+                headers={"Content-Type": "application/json"}
+            )
+
+            if response.status_code == 204:
+                logger.info(f"Discord notification sent for {product.get('pid')}")
+                return True
+            else:
+                logger.error(f"Discord notification failed with status {response.status_code}: {response.text}")
+                return False
+
         except Exception as e:
-            logger.error(f"Error saving product database to file: {str(e)}")
+            logger.error(f"Error sending Discord notification: {str(e)}")
+            return False
 
     def main_monitor_loop(self, proxy_manager=None, notifier=None):
         """
-        Main monitoring loop that combines scanning and stock checking
+        Main monitoring loop for Books-A-Million
 
         Args:
-            proxy_manager: Optional proxy manager for rotation
-            notifier: Optional notifier for sending alerts
+            proxy_manager: Optional proxy manager
+            notifier: Optional notifier instance (from the dispatcher)
         """
         logger.info("Starting main monitor loop")
 
         try:
-            # Step 1: Scan for new items
-            proxy = proxy_manager.get_proxy() if proxy_manager else None
-            new_pids = self.scan_new_items(proxy=proxy)
-
-            # Step 2: Process new PIDs
-            for pid in new_pids:
-                # Get a fresh proxy for each check
-                if proxy_manager:
+            # Get proxy if available
+            proxy = None
+            if proxy_manager:
+                try:
                     proxy = proxy_manager.get_proxy()
+                except Exception as e:
+                    logger.error(f"Error getting proxy: {str(e)}")
 
-                # Check stock for the new PID
-                result = self._check_single_stock(pid=pid, proxy=proxy)
+            # Step 1: Scan for new products
+            new_products = self.scan_new_items(proxy=proxy)
 
-                # Send notification for new product
-                if notifier and result:
+            # Step 2: Send notifications for new products
+            for product in new_products:
+                # If using the notifier module
+                if notifier:
                     notifier.send_alert(
-                        title=f"New Product: {result['title']}",
-                        description=f"Found new product on Books-A-Million: {result['title']}\nPrice: ${result['price']}\nStatus: {'IN STOCK' if result['in_stock'] else 'OUT OF STOCK'}",
-                        url=result["url"],
-                        image=result["image"],
+                        title=f"New Pokemon Product: {product.get('title', 'Unknown')}",
+                        description=f"A new Pokemon product has been found on Books-A-Million.\nPrice: ${product.get('price', 'Unknown')}\nSKU: {product.get('pid', 'Unknown')}",
+                        url=product.get('url', ''),
+                        image=product.get('image', ''),
                         store=self.NAME
                     )
+                else:
+                    # Use internal Discord notification
+                    self.send_discord_notification(product, is_new=True)
 
-            # Step 3: Check existing products (prioritize ones not checked recently)
-            # Get products from database ordered by last check time
-            try:
-                db_products = self.db.get_products_by_module(
-                    "booksamillion",
-                    limit=10,
-                    order_by="last_check",
-                    order_direction="ASC"
-                )
+            # Step 3: Check stock for existing products
+            results = self.check_stock(proxy=proxy)
 
-                # If database query successful, use those products
-                products_to_check = [(p["pid"], p["in_stock"]) for p in db_products]
-            except Exception as e:
-                logger.error(f"Error getting products from database, using cache: {str(e)}")
-                # Fallback to cached products
-                existing_pids = [(pid, data["last_check"]) for pid, data in self.products.items()]
-                existing_pids.sort(key=lambda x: x[1])
-                products_to_check = [(pid, self.products[pid]["in_stock"]) for pid, _ in existing_pids[:10]]
+            # Step 4: Send notifications for stock changes
+            for pid, change_info in self.stock_changes.items():
+                logger.info(f"Sending notification for stock change: {pid}")
 
-            # Check each product
-            for pid, old_status in products_to_check:
-                # Get a fresh proxy for each check
-                if proxy_manager:
-                    proxy = proxy_manager.get_proxy()
-
-                # Check stock for the product
-                result = self._check_single_stock(pid=pid, proxy=proxy)
-
-                # If stock status changed, send notification
-                if old_status != result["in_stock"] and notifier:
-                    if result["in_stock"]:
-                        # Changed from out of stock to in stock
+                # If using the notifier module
+                if notifier:
+                    if change_info.get('in_stock', False):
                         notifier.send_alert(
-                            title=f"🟢 NOW IN STOCK: {result['title']}",
-                            description=(
-                                f"Product is now IN STOCK at Books-A-Million!\n"
-                                f"Price: ${result['price']}\n"
-                                f"Available at {len(result['stores'])} stores"
-                            ),
-                            url=result["url"],
-                            image=result["image"],
+                            title=f"🟢 NOW IN STOCK: {change_info.get('title', 'Unknown')}",
+                            description=f"This Pokemon product is now IN STOCK at Books-A-Million!\nPrice: ${change_info.get('price', 'Unknown')}\nAvailable at {len(change_info.get('stores', []))} stores",
+                            url=change_info.get('url', ''),
+                            image=change_info.get('image', ''),
                             store=self.NAME
                         )
                     else:
-                        # Changed from in stock to out of stock
                         notifier.send_alert(
-                            title=f"🔴 OUT OF STOCK: {result['title']}",
-                            description=(
-                                f"Product is now OUT OF STOCK at Books-A-Million\n"
-                                f"Price: ${result['price']}"
-                            ),
-                            url=result["url"],
-                            image=result["image"],
+                            title=f"🔴 OUT OF STOCK: {change_info.get('title', 'Unknown')}",
+                            description=f"This Pokemon product is now OUT OF STOCK at Books-A-Million\nPrice: ${change_info.get('price', 'Unknown')}",
+                            url=change_info.get('url', ''),
+                            image=change_info.get('image', ''),
                             store=self.NAME
                         )
+                else:
+                    # Use internal Discord notification
+                    self.send_discord_notification(change_info)
 
-                # Delay between checks to avoid rate limiting
-                time.sleep(random.uniform(2.0, 4.0))
+            # Clear stock changes after notifications
+            self.stock_changes = {}
 
             logger.info("Main monitor loop completed successfully")
 
@@ -673,29 +870,30 @@ class Booksamillion:
             logger.error(f"Error in main monitor loop: {str(e)}")
 
 
+# For standalone testing
 if __name__ == "__main__":
-    # Configure logging for standalone testing
+    # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        filename="stock_monitor.log"
+        handlers=[
+            logging.FileHandler("booksamillion.log"),
+            logging.StreamHandler()
+        ]
     )
 
-    # Create and test the module
-    bam = Booksamillion()
+    # Create module instance
+    monitor = Booksamillion()
 
-    # Test cookie generation
-    bam.refresh_session()
+    # Scan for new products
+    new_products = monitor.scan_new_items()
+    print(f"Found {len(new_products)} new products")
 
-    # Scan for items
-    new_pids = bam.scan_new_items()
-    print(f"Found {len(new_pids)} new PIDs")
+    # Check stock for products
+    results = monitor.check_stock()
+    print(f"Checked stock for {len(results)} products")
 
-    # Test stock check with a known PID
-    test_pid = "F820650412493"  # Pokemon card
-    if new_pids:
-        test_pid = new_pids[0]
-
-    result = bam.check_stock(test_pid)
-    print(f"Stock check result for {test_pid}:")
-    print(json.dumps(result, indent=2))
+    # Display in-stock products
+    for product in results:
+        if product.get('in_stock'):
+            print(f"IN STOCK: {product.get('title')} at {len(product.get('stores', []))} stores")
