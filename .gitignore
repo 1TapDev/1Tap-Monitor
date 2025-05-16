@@ -27,11 +27,13 @@ env/
 ENV/
 .env
 
-# Project specific
+# Project specific data and logs
 data/
 logs/
+logs/**/*
 *.log
 *.db
+*.db-journal
 *.sqlite3
 proxies.txt
 *_cookies.json
@@ -63,27 +65,8 @@ tmp/
 *.bak
 *.tmp
 
-# Database
-*.db-journal
-
 # Security
 *.pem
 *.key
 *.cert
 *.env
-
-# Data storage
-data/
-*.db
-*.sqlite3
-proxies.txt
-*_cookies.json
-*_products.json
-
-# Logs and debug files
-logs/
-logs/**/*
-*.log
-
-# Configuration
-config_*.json

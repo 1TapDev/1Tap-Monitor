@@ -31,7 +31,7 @@ logger = logging.getLogger("StockChecker")
 def load_config():
     """Load configuration from config.json"""
     try:
-        with open('config/config.json', 'r') as f:
+        with open('config/global.json', 'r') as f:
             return json.load(f)
     except FileNotFoundError:
         logger.error("Config file not found. Creating a default one.")
