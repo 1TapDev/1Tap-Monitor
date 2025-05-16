@@ -9,6 +9,11 @@
     "save_html": false,
     "log_requests": false
   },
+  "database": {
+    "enabled": true,
+    "type": "sqlite",
+    "file": "data/stockchecker.db"
+  },
   "proxy_settings": {
     "rotation_method": "sequential",
     "retry_failed_after": 600,

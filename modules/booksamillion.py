@@ -21,8 +21,10 @@ from utils.headers_generator import generate_chrome_headers
 from utils.config_loader import load_module_config, load_module_targets, update_pid_list
 from utils.request_logger import get_request_logger
 from utils.http_logger import get_http_logger
+from utils.database_manager import get_database
 
 logger = logging.getLogger("Booksamillion")
+
 
 class Booksamillion:
     """
@@ -31,7 +33,7 @@ class Booksamillion:
 
     # Module metadata
     NAME = "Books-A-Million"
-    VERSION = "1.1.0"
+    VERSION = "1.2.0"  # Updated version for database integration
     INTERVAL = 300  # Default check interval in seconds
 
     request_logger = get_request_logger()
@@ -81,31 +83,87 @@ class Booksamillion:
         # Create session from the CloudflareBypass
         self.session = self.cf_bypass.create_session()
 
-        # Load or initialize product database
+        # Initialize the database connection
+        self.db = get_database()
+
+        # Load products cache
         self.products = self._load_products()
 
     def _load_products(self) -> Dict[str, Dict]:
-        """Load product database from file or return empty dict"""
-        product_file = Path(self.config["product_db_file"])
-        if product_file.exists():
-            try:
-                with open(product_file, 'r') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"Error loading product database: {str(e)}")
+        """
+        Load product database from database or fallback to file
 
-        # If we get here, either no product DB or error
+        Returns:
+            Dict of products indexed by PID
+        """
+        products = {}
+
+        try:
+            # First try to load from database
+            db_products = self.db.get_products_by_module("booksamillion", limit=1000)
+
+            if db_products:
+                logger.info(f"Loaded {len(db_products)} products from database")
+
+                # Convert list to dictionary keyed by PID
+                for product in db_products:
+                    products[product["pid"]] = product
+
+                return products
+
+            # If database is empty or disabled, try file as fallback
+            product_file = Path(self.config["product_db_file"])
+            if product_file.exists():
+                try:
+                    with open(product_file, 'r') as f:
+                        file_products = json.load(f)
+
+                    logger.info(f"Loaded {len(file_products)} products from file")
+
+                    # If we loaded from file, migrate to database
+                    if file_products:
+                        self._migrate_products_to_db(file_products)
+
+                    return file_products
+                except Exception as e:
+                    logger.error(f"Error loading product database file: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error loading products from database: {str(e)}")
+
+        # If we get here, either no products or error
         return {}
 
-    def _save_products(self):
-        """Save product database to file"""
-        product_file = Path(self.config["product_db_file"])
+    def _migrate_products_to_db(self, products: Dict[str, Dict]):
+        """
+        Migrate products from file storage to database
+
+        Args:
+            products: Dictionary of products indexed by PID
+        """
         try:
-            with open(product_file, 'w') as f:
-                json.dump(self.products, f, indent=2)
-            logger.info(f"Saved {len(self.products)} products to database")
+            batch_products = []
+
+            for pid, product in products.items():
+                # Prepare product for database
+                db_product = {
+                    "pid": pid,
+                    "title": product.get("title", ""),
+                    "price": product.get("price", ""),
+                    "url": product.get("url", ""),
+                    "image_url": product.get("image", ""),
+                    "in_stock": product.get("in_stock", False),
+                    "module": "booksamillion",
+                    "data": product  # Store full product data
+                }
+
+                batch_products.append(db_product)
+
+            # Batch insert into database
+            if batch_products:
+                success, failures = self.db.batch_add_products(batch_products)
+                logger.info(f"Migrated {success} products to database, {failures} failures")
         except Exception as e:
-            logger.error(f"Error saving product database: {str(e)}")
+            logger.error(f"Error migrating products to database: {str(e)}")
 
     def refresh_session(self):
         """Refresh the session with new cookies and headers"""
@@ -399,6 +457,7 @@ class Booksamillion:
 
                         # Add store details
                         store_info = {
+                            "store_id": store.get('StoreNumber', ''),
                             "name": store.get('Name', ''),
                             "address": f"{store.get('Address1', '')} {store.get('Address2', '')}".strip(),
                             "city": store.get('City', ''),
@@ -406,7 +465,8 @@ class Booksamillion:
                             "zip": store.get('PostCode', ''),
                             "phone": store.get('PhoneNumber', ''),
                             "distance": store.get('Distance', ''),
-                            "hours": store.get('BusinessHours', '')
+                            "hours": store.get('BusinessHours', ''),
+                            "module": "booksamillion"  # Added for database compatibility
                         }
 
                         result["stores"].append(store_info)
@@ -504,15 +564,18 @@ class Booksamillion:
 
         Args:
             result: Stock check result dictionary
+
+        Returns:
+            bool: True if stock status changed or new product, False otherwise
         """
         pid = result["pid"]
         current_time = datetime.now().isoformat()
         in_stock = result["in_stock"]
 
-        # Check if this is a new product
+        # Check if this is a new product in our cache
         is_new = pid not in self.products
 
-        # If new product, initialize its entry
+        # If new product, initialize its entry in our local cache
         if is_new:
             self.products[pid] = {
                 "pid": pid,
@@ -528,7 +591,7 @@ class Booksamillion:
                 "stores": result["stores"] if in_stock else []
             }
         else:
-            # Update existing product
+            # Update existing product in our local cache
             product = self.products[pid]
 
             # Update basic info
@@ -549,11 +612,53 @@ class Booksamillion:
                 product["last_out_of_stock"] = current_time
                 product["stores"] = []
 
-        # Save the updated database
-        self._save_products()
+        # Update the database with the new information
+        try:
+            # Prepare the product data for database
+            db_product = {
+                "pid": pid,
+                "title": result["title"],
+                "price": result["price"],
+                "url": result["url"],
+                "image_url": result["image"],
+                "in_stock": in_stock,
+                "module": "booksamillion",
+                "data": self.products[pid]  # Store full product data
+            }
 
-        # Return whether this is a new product or a stock change
-        return is_new or (not is_new and stock_changed)
+            # Add to database
+            self.db.add_product(db_product)
+
+            # If the product is in stock, update store availability
+            if in_stock and result["stores"]:
+                self.db.update_stock_status(pid, in_stock, result["stores"])
+            else:
+                self.db.update_stock_status(pid, in_stock)
+
+            # Compatibility: Still save to file as backup
+            self._save_products_to_file()
+
+            # Return whether this is a new product or stock changed
+            return is_new or (not is_new and stock_changed)
+
+        except Exception as e:
+            logger.error(f"Error updating product in database: {str(e)}")
+
+            # Fallback to file storage if database fails
+            self._save_products_to_file()
+
+            # Still return the status
+            return is_new or (not is_new and in_stock != self.products[pid].get("in_stock", False))
+
+    def _save_products_to_file(self):
+        """Save product database to file as backup"""
+        try:
+            product_file = Path(self.config["product_db_file"])
+            with open(product_file, 'w') as f:
+                json.dump(self.products, f, indent=2)
+            logger.debug(f"Saved {len(self.products)} products to file backup")
+        except Exception as e:
+            logger.error(f"Error saving product database to file: {str(e)}")
 
     def main_monitor_loop(self, proxy_manager=None, notifier=None):
         """
@@ -590,18 +695,29 @@ class Booksamillion:
                     )
 
             # Step 3: Check existing products (prioritize ones not checked recently)
-            # Sort by last check time, oldest first
-            existing_pids = [(pid, data["last_check"]) for pid, data in self.products.items()]
-            existing_pids.sort(key=lambda x: x[1])
+            # Get products from database ordered by last check time
+            try:
+                db_products = self.db.get_products_by_module(
+                    "booksamillion",
+                    limit=10,
+                    order_by="last_check",
+                    order_direction="ASC"
+                )
 
-            # Check up to 10 existing products per run
-            for pid, _ in existing_pids[:10]:
+                # If database query successful, use those products
+                products_to_check = [(p["pid"], p["in_stock"]) for p in db_products]
+            except Exception as e:
+                logger.error(f"Error getting products from database, using cache: {str(e)}")
+                # Fallback to cached products
+                existing_pids = [(pid, data["last_check"]) for pid, data in self.products.items()]
+                existing_pids.sort(key=lambda x: x[1])
+                products_to_check = [(pid, self.products[pid]["in_stock"]) for pid, _ in existing_pids[:10]]
+
+            # Check each product
+            for pid, old_status in products_to_check:
                 # Get a fresh proxy for each check
                 if proxy_manager:
                     proxy = proxy_manager.get_proxy()
-
-                # Get the old stock status
-                old_status = self.products[pid]["in_stock"]
 
                 # Check stock for the product
                 result = self._check_single_stock(pid=pid, proxy=proxy)
