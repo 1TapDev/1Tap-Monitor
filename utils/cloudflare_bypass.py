@@ -155,6 +155,8 @@ class CloudflareBypass:
         # Set default logging behavior
         self.enable_logging = True
 
+        self.aggressive_mode = False
+
     def _load_cookies(self):
         """Load cookies from file"""
         if self.cookie_file.exists():
@@ -240,6 +242,16 @@ class CloudflareBypass:
         }
         session.headers.update(headers)
 
+        # Extra spoof headers to look more like real browser
+        session.headers.update({
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+            "Pragma": "no-cache"
+        })
+
         # Add cookies if we have any
         for name, value in self.cookies.items():
             session.cookies.set(name, value)
@@ -283,12 +295,12 @@ class CloudflareBypass:
         # Try cloudscraper first
         if CLOUDSCRAPER_AVAILABLE:
             success = self._get_cookies_with_cloudscraper()
-            if success:
+            if success or self.cookies:
                 self.failed_attempts = 0
                 return True
 
-        # Try TLS Client as fallback
-        if TLS_CLIENT_AVAILABLE:
+        # Only use TLS Client if cookies are still empty
+        if TLS_CLIENT_AVAILABLE and not self.cookies:
             success = self._get_cookies_with_tls_client()
             if success:
                 self.failed_attempts = 0
@@ -451,9 +463,13 @@ class CloudflareBypass:
                             self.session.cookies.set(name, value)
 
                     return False
+            elif response.status_code == 403:
+                logger.warning("TLS Client bypass failed permanently with 403, skipping to fallback.")
+                return False
             else:
                 logger.warning(f"Failed to get cookies with TLS Client: {response.status_code}")
                 return False
+
 
         except Exception as e:
             logger.error(f"Error using TLS Client for cookies: {str(e)}")
@@ -465,6 +481,10 @@ class CloudflareBypass:
         if self.should_refresh_cookies():
             self.get_fresh_cookies()
 
+        if getattr(self, "aggressive_mode", False):
+            logger.info("Aggressive mode enabled — skipping cookie refresh")
+            return False
+
         # Return the session (which was updated if needed)
         return self.session
 
@@ -474,9 +494,9 @@ class CloudflareBypass:
         enable_logging = kwargs.pop('enable_logging', self.enable_logging)
         log_filename = kwargs.pop('log_filename', None)
 
-        # Check if cookies need refreshing
-        if self.should_refresh_cookies():
-            logger.info("Cookies expired or invalid, refreshing...")
+        # Refresh only once per session start or after 403
+        if self.should_refresh_cookies() and not self.cookies:
+            logger.info("No valid cookies at startup, refreshing...")
             self.get_fresh_cookies()
 
         # Make the request with retry logic

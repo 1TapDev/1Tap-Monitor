@@ -121,6 +121,7 @@ class Booksamillion:
             enable_logging=self.config.get("debug", {}).get("log_requests", True),
             save_readable=self.config.get("debug", {}).get("save_html", False)
         )
+        self.cf_bypass.aggressive_mode = True
 
         # Create session
         self.session = self.cf_bypass.create_session()
