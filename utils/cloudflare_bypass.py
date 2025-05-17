@@ -467,12 +467,15 @@ class CloudflareBypass:
         """
         # Get request parameters
         enable_logging = kwargs.pop('enable_logging', self.enable_logging)
+        log_filename = kwargs.pop('log_filename', None)
         headers = kwargs.get('headers', {})
         params = kwargs.get('params', None)
         timeout = kwargs.get('timeout', 30)
 
-        # Ensure we have valid cookies
+        # Only refresh cookies if needed - we check cookie status at the beginning
+        # instead of generating fresh cookies for every request
         if self.should_refresh_cookies():
+            logger.info("Cookies expired or invalid, refreshing...")
             self.get_fresh_cookies()
 
         # Make the request
@@ -499,26 +502,19 @@ class CloudflareBypass:
 
                 # Log the request and response
                 if enable_logging:
+                    # Use the provided filename if available
                     log_path = self.request_logger.log_from_response(
                         url=url,
                         method="GET",
                         headers=dict(self.session.headers) if headers is None else headers,
                         params=params,
-                        response=response
+                        response=response,
+                        log_filename=log_filename
                     )
                     if log_path:
                         logger.info(f"Request log saved to {log_path}")
 
-                # Save readable response if enabled
-                if self.save_readable:
-                    timestamp = int(time.time())
-                    readable_filename = self.request_logger._safe_filename(url)
-                    readable_path = Path("logs/readable") / f"{timestamp}_{readable_filename}.txt"
-
-                    if self.request_logger.save_readable_response(response, readable_path):
-                        logger.info(f"Readable response saved to {readable_path}")
-
-                # Check if we hit a Cloudflare challenge
+                # Only check for Cloudflare challenge after a request is made
                 if response.status_code == 403 or "challenge" in response.text.lower():
                     logger.warning(f"Got Cloudflare challenge on attempt {attempt + 1}, refreshing cookies...")
                     self.get_fresh_cookies()
@@ -644,9 +640,9 @@ class CloudflareBypass:
     def set_logging(self, enable_logging=True, save_readable=False):
         """Configure logging behavior"""
         self.enable_logging = enable_logging
-        self.save_readable = save_readable
+        self.save_readable = False
         self.request_logger.enabled = enable_logging
-        self.request_logger.save_readable = save_readable
+        self.request_logger.save_readable = False
 
 
 # Create a function to get cloudflare bypass instance

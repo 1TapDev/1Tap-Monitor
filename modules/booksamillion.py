@@ -337,7 +337,9 @@ class Booksamillion:
                 response = self.cf_bypass.get(
                     inventory_url,
                     headers=headers,
-                    timeout=self.config.get("timeout", 30)
+                    timeout=self.config.get("timeout", 30),
+                    enable_logging=True,
+                    log_filename=f"{pid}.log"  # Use PID for log filename
                 )
 
                 if response.status_code == 200:
@@ -345,7 +347,7 @@ class Booksamillion:
 
                 logger.warning(f"Got status code {response.status_code} on attempt {attempt + 1}")
 
-                # Refresh session if we hit a cloudflare challenge
+                # Refresh session only if we hit a cloudflare challenge
                 if "challenge" in response.text.lower() or response.status_code == 403:
                     logger.info("Refreshing cookies due to Cloudflare challenge")
                     self.cf_bypass.refresh_session()
@@ -819,7 +821,7 @@ class Booksamillion:
 
             # Step 2: Send notifications for new products
             for product in new_products:
-                # If using the notifier module
+                # Use the notifier module if available, otherwise use internal Discord notification
                 if notifier:
                     notifier.send_alert(
                         title=f"New Pokemon Product: {product.get('title', 'Unknown')}",
@@ -839,7 +841,8 @@ class Booksamillion:
             for pid, change_info in self.stock_changes.items():
                 logger.info(f"Sending notification for stock change: {pid}")
 
-                # If using the notifier module
+                # Make sure to send to both notifier and webhook
+                # First try the notifier module if available
                 if notifier:
                     if change_info.get('in_stock', False):
                         notifier.send_alert(
@@ -857,9 +860,13 @@ class Booksamillion:
                             image=change_info.get('image', ''),
                             store=self.NAME
                         )
+
+                # Always send through the internal webhook too as a backup
+                success = self.send_discord_notification(change_info)
+                if success:
+                    logger.info(f"Successfully sent Discord notification for {pid}")
                 else:
-                    # Use internal Discord notification
-                    self.send_discord_notification(change_info)
+                    logger.error(f"Failed to send Discord notification for {pid}")
 
             # Clear stock changes after notifications
             self.stock_changes = {}

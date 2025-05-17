@@ -11,10 +11,14 @@ import time
 import logging
 import argparse
 from pathlib import Path
-
+from dotenv import load_dotenv
 from dispatcher import ModuleDispatcher
 from proxy_manager import ProxyManager
 from notifier import DiscordNotifier
+
+load_dotenv()
+
+DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK')
 
 # Configure logging
 logging.basicConfig(
