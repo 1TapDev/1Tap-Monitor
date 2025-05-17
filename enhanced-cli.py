@@ -12,6 +12,8 @@ import signal
 import argparse
 import threading
 import datetime
+import logging
+import logging.handlers
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -76,11 +78,63 @@ except ImportError:
         f"{Fore.YELLOW}Make sure you have utils/__init__.py file (run this script once to create it).{Style.RESET_ALL}")
     sys.exit(1)
 
+
+# Setup logging with rotation
+def setup_logging(log_dir="logs"):
+    """Set up logging with rotation"""
+    # Ensure log directory exists
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Create a custom logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # Create handlers
+    # Console handler
+    c_handler = logging.StreamHandler()
+    c_handler.setLevel(logging.INFO)
+
+    # File handler with rotation (10MB files, keep 5 backups)
+    log_file = os.path.join(log_dir, "stock_checker.log")
+    f_handler = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5
+    )
+    f_handler.setLevel(logging.INFO)
+
+    # Create formatters and add to handlers
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    c_formatter = logging.Formatter(log_format)
+    f_formatter = logging.Formatter(log_format)
+    c_handler.setFormatter(c_formatter)
+    f_handler.setFormatter(f_formatter)
+
+    # Add handlers to the logger
+    logger.addHandler(c_handler)
+    logger.addHandler(f_handler)
+
+    # Create request logs directory for detailed request logs
+    req_log_dir = os.path.join(log_dir, "requests")
+    os.makedirs(req_log_dir, exist_ok=True)
+
+    # Set up request log rotation
+    from utils.request_logger import get_request_logger
+    request_logger = get_request_logger()
+    request_logger.enable_log_rotation(max_bytes=5 * 1024 * 1024, backup_count=3)
+
+    return logger
+
+
 # Global variables
 running = True
 status_thread = None
 dispatcher = None
 config = None
+metrics = {
+    "cookie_refreshes": 0,
+    "request_failures": 0,
+    "successful_requests": 0,
+    "last_runtime": {},
+}
 
 
 def load_config():
@@ -100,7 +154,7 @@ def load_config():
             }
 
         # Ensure directories exist
-        for directory in ['config', 'config/modules', 'data', 'logs', 'logs/requests', 'logs/readable']:
+        for directory in ['config', 'config/modules', 'data', 'logs', 'logs/requests']:
             os.makedirs(directory, exist_ok=True)
 
         return config
@@ -151,6 +205,7 @@ def status_display_thread():
     """Thread to continuously update status display"""
     global running
     global dispatcher
+    global metrics
 
     if not dispatcher:
         return
@@ -169,16 +224,30 @@ def status_display_thread():
 
         print(f"{Fore.CYAN}========== STOCK CHECKER STATUS - {now} =========={Style.RESET_ALL}")
         print(f"Uptime: {format_time_delta(uptime)}")
-        print(f"Discord Webhook: {'Configured' if config.get('discord_webhook') else 'Not Configured'}")
+
+        webhook_status = "Configured" if config.get('discord_webhook') or os.getenv(
+            'DISCORD_WEBHOOK') else "Not Configured"
+        print(f"Discord Webhook: {webhook_status}")
         print(f"Proxy Support: {'Enabled' if config.get('use_proxies', False) else 'Disabled'}")
+        print()
+
+        # Display performance metrics
+        print(f"{Fore.CYAN}PERFORMANCE METRICS:{Style.RESET_ALL}")
+        print(f"Cookie Refreshes: {metrics['cookie_refreshes']}")
+        print(f"Request Failures: {metrics['request_failures']}")
+        print(f"Successful Requests: {metrics['successful_requests']}")
+        if metrics['request_failures'] > 0:
+            failure_rate = metrics['request_failures'] / (
+                        metrics['request_failures'] + metrics['successful_requests']) * 100
+            print(f"Failure Rate: {failure_rate:.1f}%")
         print()
 
         # Get and display module status
         status = dispatcher.get_status()
 
         print(f"{Fore.CYAN}MODULE STATUS:{Style.RESET_ALL}")
-        print(f"{'MODULE':<20} {'STATUS':<10} {'LAST RUN':<20} {'NEXT RUN':<20}")
-        print("-" * 70)
+        print(f"{'MODULE':<20} {'STATUS':<10} {'LAST RUN':<20} {'NEXT RUN':<20} {'RUNTIME':<10}")
+        print("-" * 80)
 
         for module_name, details in status.items():
             module_status = details.get('status', 'Unknown')
@@ -186,10 +255,13 @@ def status_display_thread():
 
             last_run = details.get('last_run', 'Never')
             next_run = details.get('next_run', 'N/A')
+            runtime = metrics['last_runtime'].get(module_name, 'N/A')
+            if isinstance(runtime, (int, float)):
+                runtime = f"{runtime:.1f}s"
 
             print(f"{Fore.WHITE}{module_name:<20}{Style.RESET_ALL} "
                   f"{status_color}{module_status:<10}{Style.RESET_ALL} "
-                  f"{last_run:<20} {next_run:<20}")
+                  f"{last_run:<20} {next_run:<20} {runtime:<10}")
 
         print()
         print(f"{Fore.CYAN}COMMANDS:{Style.RESET_ALL}")
@@ -198,7 +270,9 @@ def status_display_thread():
         print(f"  {Fore.WHITE}restart <module>{Style.RESET_ALL} - Restart a module")
         print(f"  {Fore.WHITE}reload <module>{Style.RESET_ALL} - Reload module code")
         print(f"  {Fore.WHITE}status{Style.RESET_ALL} - Refresh status display")
+        print(f"  {Fore.WHITE}metrics{Style.RESET_ALL} - Show detailed metrics")
         print(f"  {Fore.WHITE}watch{Style.RESET_ALL} - Toggle auto-refresh mode")
+        print(f"  {Fore.WHITE}test <module>{Style.RESET_ALL} - Run test for a module")
         print(f"  {Fore.WHITE}exit{Style.RESET_ALL} - Exit the program")
         print()
 
@@ -215,7 +289,7 @@ def daemon_mode():
 
     # Initialize components
     proxy_manager = ProxyManager('proxies.txt') if config['use_proxies'] else None
-    notifier = DiscordNotifier(config.get('discord_webhook', ''))
+    notifier = DiscordNotifier(os.getenv('DISCORD_WEBHOOK', config.get('discord_webhook', '')))
 
     # Create dispatcher
     dispatcher = ModuleDispatcher(
@@ -223,6 +297,9 @@ def daemon_mode():
         proxy_manager=proxy_manager,
         config=config
     )
+
+    # Install performance monitoring hooks
+    install_monitoring_hooks(dispatcher)
 
     # Discover available modules
     dispatcher.discover_modules()
@@ -257,7 +334,7 @@ def interactive_mode():
 
     # Initialize components
     proxy_manager = ProxyManager('proxies.txt') if config['use_proxies'] else None
-    notifier = DiscordNotifier(config.get('discord_webhook', ''))
+    notifier = DiscordNotifier(os.getenv('DISCORD_WEBHOOK', config.get('discord_webhook', '')))
 
     # Create dispatcher
     dispatcher = ModuleDispatcher(
@@ -265,6 +342,9 @@ def interactive_mode():
         proxy_manager=proxy_manager,
         config=config
     )
+
+    # Install performance monitoring hooks
+    install_monitoring_hooks(dispatcher)
 
     # Discover available modules
     print("Discovering modules...")
@@ -344,6 +424,9 @@ def interactive_mode():
                 # Manually update status display
                 pass
 
+            elif action == "metrics":
+                display_detailed_metrics()
+
             elif action == "watch":
                 auto_refresh = not auto_refresh
                 if auto_refresh:
@@ -351,12 +434,212 @@ def interactive_mode():
                 else:
                     print(f"{Fore.YELLOW}Auto-refresh disabled.{Style.RESET_ALL}")
 
+            elif action == "test":
+                if len(parts) < 2:
+                    print("Usage: test <module_name>")
+                    continue
+
+                module_name = parts[1]
+                run_module_test(module_name)
+
             else:
                 print(f"Unknown command: {action}")
-                print("Available commands: start, stop, restart, reload, status, watch, exit")
+                print("Available commands: start, stop, restart, reload, status, metrics, watch, test, exit")
 
         except Exception as e:
             print(f"{Fore.RED}Error: {str(e)}{Style.RESET_ALL}")
+
+
+def install_monitoring_hooks(dispatcher_instance):
+    """Install monitoring hooks to track performance metrics"""
+    # Monkey patch the CloudflareBypass class to monitor cookie refreshes
+    from utils.cloudflare_bypass import CloudflareBypass
+    original_get_fresh_cookies = CloudflareBypass.get_fresh_cookies
+
+    def patched_get_fresh_cookies(self):
+        global metrics
+        result = original_get_fresh_cookies(self)
+        if result:
+            metrics["cookie_refreshes"] += 1
+        return result
+
+    CloudflareBypass.get_fresh_cookies = patched_get_fresh_cookies
+
+    # Monitor HTTP request successes and failures
+    from utils.cloudflare_bypass import get_cloudflare_bypass
+    bypass = get_cloudflare_bypass('https://example.com')  # Just to get an instance
+    original_get = bypass.__class__.get
+
+    def patched_get(self, url, **kwargs):
+        global metrics
+        try:
+            response = original_get(self, url, **kwargs)
+            if response.status_code < 400:
+                metrics["successful_requests"] += 1
+            else:
+                metrics["request_failures"] += 1
+            return response
+        except Exception as e:
+            metrics["request_failures"] += 1
+            raise
+
+    bypass.__class__.get = patched_get
+
+    # Monitor module runtimes
+    original_main_monitor_loop = dispatcher_instance.module_threads.__class__.run
+
+    def patched_run(self):
+        global metrics
+        module_name = self.module.__class__.__name__.lower()
+        start_time = time.time()
+        try:
+            return original_main_monitor_loop(self)
+        finally:
+            runtime = time.time() - start_time
+            metrics["last_runtime"][module_name] = runtime
+
+    dispatcher_instance.module_threads.__class__.run = patched_run
+
+
+def display_detailed_metrics():
+    """Display detailed performance metrics"""
+    global metrics
+
+    print(f"\n{Fore.CYAN}===== DETAILED PERFORMANCE METRICS ====={Style.RESET_ALL}")
+    print(f"Cookie Refreshes: {metrics['cookie_refreshes']}")
+    print(f"Request Failures: {metrics['request_failures']}")
+    print(f"Successful Requests: {metrics['successful_requests']}")
+
+    if metrics['request_failures'] > 0:
+        failure_rate = metrics['request_failures'] / (
+                    metrics['request_failures'] + metrics['successful_requests']) * 100
+        print(f"Overall Failure Rate: {failure_rate:.2f}%")
+
+    print(f"\n{Fore.CYAN}Module Runtimes:{Style.RESET_ALL}")
+    for module, runtime in metrics['last_runtime'].items():
+        print(f"  {module}: {runtime:.2f}s")
+
+    # Get system info
+    import platform
+    import psutil
+
+    print(f"\n{Fore.CYAN}System Information:{Style.RESET_ALL}")
+    print(f"  Python Version: {platform.python_version()}")
+    print(f"  OS: {platform.system()} {platform.release()}")
+    print(f"  CPU Usage: {psutil.cpu_percent()}%")
+    print(f"  Memory Usage: {psutil.virtual_memory().percent}%")
+
+    # Check for log file sizes
+    print(f"\n{Fore.CYAN}Log Information:{Style.RESET_ALL}")
+    log_dir = Path("logs")
+    if log_dir.exists():
+        log_files = list(log_dir.glob("**/*.log"))
+        total_size = sum(f.stat().st_size for f in log_files)
+        print(f"  Log Files: {len(log_files)}")
+        print(f"  Total Log Size: {total_size / (1024 * 1024):.2f} MB")
+
+        # List largest log files
+        if log_files:
+            print(f"\n{Fore.CYAN}Largest Log Files:{Style.RESET_ALL}")
+            largest_logs = sorted(log_files, key=lambda f: f.stat().st_size, reverse=True)[:5]
+            for log_file in largest_logs:
+                size_mb = log_file.stat().st_size / (1024 * 1024)
+                print(f"  {log_file}: {size_mb:.2f} MB")
+
+
+def run_module_test(module_name):
+    """Run automated test for a specific module"""
+    print(f"\n{Fore.CYAN}Running test for module: {module_name}{Style.RESET_ALL}")
+
+    # Check if test file exists
+    test_file = Path(f"tests/test_{module_name}.py")
+    if not test_file.exists():
+        # Create test directory if it doesn't exist
+        test_file.parent.mkdir(exist_ok=True)
+
+        # Generate a basic test file
+        print(f"Test file not found. Creating basic test file at {test_file}")
+        with open(test_file, 'w') as f:
+            f.write(f"""
+#!/usr/bin/env python3
+\"\"\"
+Automated tests for the {module_name} module
+\"\"\"
+
+import os
+import sys
+import unittest
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+class Test{module_name.capitalize()}(unittest.TestCase):
+    \"\"\"Test cases for {module_name} module\"\"\"
+
+    def setUp(self):
+        \"\"\"Set up test environment\"\"\"
+        # Import module to test
+        module_path = f'modules.{module_name}'
+        try:
+            self.module = __import__(module_path, fromlist=[''])
+        except ImportError:
+            self.fail(f"Could not import module {{module_path}}")
+
+    def test_module_initialization(self):
+        \"\"\"Test that the module initializes properly\"\"\"
+        # Get the module class (assuming it follows the convention)
+        class_name = ''.join(word.capitalize() for word in module_name.split('_'))
+        self.assertTrue(hasattr(self.module, class_name), 
+                      f"Module does not contain class {{class_name}}")
+
+        # Create an instance
+        instance = getattr(self.module, class_name)()
+        self.assertIsNotNone(instance, "Failed to create module instance")
+
+    def test_cookie_management(self):
+        \"\"\"Test cookie management\"\"\"
+        # Get the module class
+        class_name = ''.join(word.capitalize() for word in module_name.split('_'))
+        module_class = getattr(self.module, class_name)
+
+        # Create an instance
+        instance = module_class()
+
+        # Check if the cloudflare bypass is initialized
+        self.assertTrue(hasattr(instance, 'cf_bypass'), 
+                      "Module does not have cf_bypass attribute")
+
+    def test_check_stock(self):
+        \"\"\"Test stock checking functionality\"\"\"
+        # This is a mock test - in real tests, you would mock network calls
+        pass
+
+if __name__ == '__main__':
+    unittest.main()
+""")
+
+    # Run the test
+    try:
+        import subprocess
+        result = subprocess.run([sys.executable, str(test_file)],
+                                capture_output=True, text=True)
+
+        if result.returncode == 0:
+            print(f"{Fore.GREEN}Tests passed!{Style.RESET_ALL}")
+            print(result.stdout)
+        else:
+            print(f"{Fore.RED}Tests failed!{Style.RESET_ALL}")
+            print(result.stderr)
+
+            # Suggest fixes based on error messages
+            if "log_filename" in result.stderr:
+                print(f"\n{Fore.YELLOW}Possible fix:{Style.RESET_ALL}")
+                print(
+                    "The 'log_filename' parameter issue detected. Try updating utils/request_logger.py to accept this parameter.")
+                print("Edit the log_from_response method to include the log_filename parameter.")
+    except Exception as e:
+        print(f"{Fore.RED}Error running tests: {str(e)}{Style.RESET_ALL}")
 
 
 def create_default_configs():
@@ -365,7 +648,7 @@ def create_default_configs():
     global_config_path = Path("config/global.json")
     if not global_config_path.exists():
         global_config = {
-            "discord_webhook": "https://discord.com/api/webhooks/1367540658767663274/bd5oxBHoOLun7w08zi_rQ4bkDk1ZZtocRnrU_rTmztwE2t4ilnBMs3bn3ViNkn5UTKfq",
+            "discord_webhook": "",
             "check_interval": 60,
             "use_proxies": True,
             "gui_enabled": False,
@@ -378,6 +661,7 @@ def create_default_configs():
         }
 
         try:
+            global_config_path.parent.mkdir(parents=True, exist_ok=True)
             with open(global_config_path, "w") as f:
                 json.dump(global_config, f, indent=2)
             print(f"Created default global config at {global_config_path}")
@@ -422,7 +706,7 @@ def create_default_configs():
 
             "webhook": {
                 "enabled": True,
-                "url": "https://discord.com/api/webhooks/1367540658767663274/bd5oxBHoOLun7w08zi_rQ4bkDk1ZZtocRnrU_rTmztwE2t4ilnBMs3bn3ViNkn5UTKfq",
+                "url": "",
                 "format": "discord",
                 "mentions": [],
                 "avatar_url": "https://www.booksamillion.com/favicon.ico",
@@ -445,11 +729,15 @@ def main():
     parser.add_argument('--daemon', action='store_true', help='Run in daemon mode (non-interactive)')
     parser.add_argument('--no-proxies', action='store_true', help='Disable proxy usage')
     parser.add_argument('--config', help='Path to config file')
+    parser.add_argument('--test', help='Run tests for a specific module')
     args = parser.parse_args()
 
     # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
+    # Set up logging with rotation
+    setup_logging()
 
     # Create default config files if needed
     create_default_configs()
@@ -460,6 +748,11 @@ def main():
     # Override config with command line args
     if args.no_proxies:
         config['use_proxies'] = False
+
+    # Run tests if requested
+    if args.test:
+        run_module_test(args.test)
+        return
 
     # Run in appropriate mode
     if args.daemon:

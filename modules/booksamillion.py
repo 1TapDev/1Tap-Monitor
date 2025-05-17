@@ -418,7 +418,7 @@ class Booksamillion:
 
                 for store in stock_data['ResultList']:
                     availability = store.get('Availability', '').upper()
-                    if availability == 'IN STOCK':
+                    if availability in ['IN STOCK', 'LIMITED STOCK']:
                         result["in_stock"] = True
                         in_stock_count += 1
 
