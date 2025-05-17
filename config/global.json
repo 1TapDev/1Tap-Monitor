@@ -1,4 +1,5 @@
 {
+  "discord_webhook": "",
   "check_interval": 60,
   "use_proxies": true,
   "gui_enabled": true,

@@ -33,7 +33,7 @@ def ensure_config_dirs():
 
 def load_module_config(module_name: str) -> Dict[str, Any]:
     """
-    Load consolidated module configuration
+    Load consolidated module configuration with secure webhook handling
 
     Args:
         module_name: Name of the module
@@ -41,6 +41,7 @@ def load_module_config(module_name: str) -> Dict[str, Any]:
     Returns:
         Dict with module configuration
     """
+    import os  # Add this import
     ensure_config_dirs()
 
     # Get the project root directory
@@ -61,6 +62,16 @@ def load_module_config(module_name: str) -> Dict[str, Any]:
                 with open(config_path, "r") as f:
                     config = json.load(f)
                     logger.info(f"Loaded module config from {config_path}")
+
+                    # Handle webhook security - add this block
+                    if module_name == 'booksamillion' and 'webhook' in config:
+                        module_webhook_var = f"{module_name.upper()}_WEBHOOK"
+                        # Try module-specific webhook first, then fallback to global
+                        if os.getenv(module_webhook_var):
+                            config['webhook']['url'] = os.getenv(module_webhook_var)
+                        elif os.getenv('DISCORD_WEBHOOK'):
+                            config['webhook']['url'] = os.getenv('DISCORD_WEBHOOK')
+
                     return config
             except Exception as e:
                 logger.error(f"Error loading config from {config_path}: {str(e)}")
@@ -73,7 +84,6 @@ def load_module_config(module_name: str) -> Dict[str, Any]:
 
     logger.warning(f"No configuration found for {module_name}")
     return {}
-
 
 def load_legacy_targets(module_name: str) -> Dict[str, Any]:
     """

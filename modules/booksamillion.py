@@ -754,18 +754,14 @@ class Booksamillion:
         }
 
     def send_discord_notification(self, product: Dict[str, Any], is_new: bool = False) -> bool:
-        """
-        Send Discord notification for product
-
-        Args:
-            product: Product information
-            is_new: Whether this is a new product notification
-
-        Returns:
-            bool: True if notification sent successfully
-        """
-        # First check webhook from config
+        """Send Discord notification for product"""
+        # First check module-specific webhook from config
         webhook_url = self.config.get("webhook", {}).get("url", "")
+
+        # If empty, check for environment variable
+        if not webhook_url:
+            import os
+            webhook_url = os.getenv('BOOKSAMILLION_WEBHOOK') or os.getenv('DISCORD_WEBHOOK', "")
 
         # Then check discord_webhook from main config
         if not webhook_url:
@@ -783,7 +779,8 @@ class Booksamillion:
             response = requests.post(
                 webhook_url,
                 json=message,
-                headers={"Content-Type": "application/json"}
+                headers={"Content-Type": "application/json"},
+                timeout=10  # Add timeout
             )
 
             if response.status_code == 204:

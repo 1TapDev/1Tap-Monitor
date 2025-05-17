@@ -16,9 +16,12 @@ from dispatcher import ModuleDispatcher
 from proxy_manager import ProxyManager
 from notifier import DiscordNotifier
 
+# Load environment variables
 load_dotenv()
 
-DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK')
+# Get webhook URLs from environment variables
+DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK', '')
+BOOKSAMILLION_WEBHOOK = os.getenv('BOOKSAMILLION_WEBHOOK', DISCORD_WEBHOOK)
 
 # Configure logging
 logging.basicConfig(
@@ -36,7 +39,13 @@ def load_config():
     """Load configuration from config.json"""
     try:
         with open('config/global.json', 'r') as f:
-            return json.load(f)
+            config = json.load(f)
+
+        # Override webhook with environment variable if available
+        if DISCORD_WEBHOOK:
+            config['discord_webhook'] = DISCORD_WEBHOOK
+
+        return config
     except FileNotFoundError:
         logger.error("Config file not found. Creating a default one.")
         default_config = {
