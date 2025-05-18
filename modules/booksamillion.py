@@ -14,6 +14,8 @@ import random
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 # Add project root to path to fix import issues
 sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
@@ -254,8 +256,8 @@ class Booksamillion:
 
                 if result:
                     results.append(result)
-                    # Update last check time
                     self.last_check[current_pid] = time.time()
+
             except Exception as e:
                 logger.error(f"Error checking stock for {current_pid}: {str(e)}")
 
@@ -442,6 +444,8 @@ class Booksamillion:
 
             # Update product information
             self._update_product(result)
+            if result.get("in_stock"):
+                self.send_discord_notification(result)
 
             return result
 
@@ -592,7 +596,8 @@ class Booksamillion:
             except Exception as e:
                 logger.error(f"Error checking stock for new product {product.get('pid')}: {str(e)}")
 
-        return new_products
+        # Return new + updated in-stock products
+        return [self.products[prod["pid"]] for prod in new_products]
 
     def _extract_products_from_html(self, html: str, base_url: str) -> List[Dict[str, Any]]:
         """
@@ -877,15 +882,21 @@ class Booksamillion:
 
 # For standalone testing
 if __name__ == "__main__":
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler("booksamillion.log"),
-            logging.StreamHandler()
-        ]
-    )
+    # Force logging configuration for "Booksamillion" logger
+    logger.setLevel(logging.INFO)
+
+    # Avoid duplicate handlers if rerunning
+    if not logger.handlers:
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+        file_handler = logging.FileHandler("booksamillion.log")
+        file_handler.setFormatter(formatter)
+
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+
+        logger.addHandler(file_handler)
+        logger.addHandler(stream_handler)
 
     # Create module instance
     monitor = Booksamillion()
@@ -896,7 +907,14 @@ if __name__ == "__main__":
 
     # Check stock for products
     results = monitor.check_stock()
+    monitor._save_products()
     print(f"Checked stock for {len(results)} products")
+
+    # Send webhook for all in-stock items (test mode)
+    for product in results:
+        if product.get("in_stock"):
+            print(f"Sending Discord test webhook for {product['pid']}")
+            monitor.send_discord_notification(product, is_new=True)
 
     # Display in-stock products
     for product in results:
