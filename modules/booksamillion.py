@@ -267,6 +267,16 @@ class Booksamillion:
         logger.info(f"Completed stock check for {len(results)} products")
         return results
 
+    def _emoji_for_status(self, status):
+        status = (status or "").upper()
+        if status == "IN STOCK":
+            return "🟢"
+        elif status == "LIMITED STOCK":
+            return "🟡"
+        elif status == "OUT OF STOCK":
+            return "🔴"
+        return "⚫"
+
     def _check_single_stock(self, pid: str, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """
         Check stock for a single product
@@ -443,9 +453,11 @@ class Booksamillion:
                 logger.info(f"Found {in_stock_count} of {stores_count} stores with stock for {pid}")
 
             # Update product information
-            self._update_product(result)
-            if result.get("in_stock"):
-                self.send_discord_notification(result)
+            new_stores = self._update_product(result)
+            for store in new_stores:
+                single_store_result = result.copy()
+                single_store_result["stores"] = [store]
+                self.send_discord_notification(single_store_result)
 
             return result
 
@@ -453,62 +465,41 @@ class Booksamillion:
             logger.error(f"Error processing response for {pid}: {str(e)}")
             return result
 
-    def _update_product(self, result: Dict[str, Any]) -> bool:
-        """
-        Update product information and detect stock changes
-
-        Args:
-            result: Product result with stock information
-
-        Returns:
-            bool: True if stock status changed, False otherwise
-        """
+    def _update_product(self, result: Dict[str, Any]) -> List[Dict[str, Any]]:
         pid = result["pid"]
-        in_stock = result["in_stock"]
         current_time = datetime.now().isoformat()
+        previous_product = self.products.get(pid, {})
 
-        # Check if this is a new product
-        is_new = pid not in self.products
+        previous_stores = {s["store_id"]: s.get("availability", "") for s in previous_product.get("stores", [])}
+        new_stores = []
 
-        # Get previous stock status to detect changes
-        stock_changed = False
+        for store in result.get("stores", []):
+            store_id = store.get("store_id")
+            prev = previous_stores.get(store_id)
+            curr = store.get("availability", "").upper()
 
-        if not is_new:
-            previous_status = self.products[pid].get("in_stock", False)
-            stock_changed = previous_status != in_stock
+            if curr != prev:
+                change_str = f"{self._emoji_for_status(prev)} -> {self._emoji_for_status(curr)}"
+                store["status_change"] = change_str
+                store["last_restocks"] = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+                new_stores.append(store)
 
-            if stock_changed:
-                logger.info(f"Stock status changed for {pid}: {previous_status} -> {in_stock}")
-
-                # Store change information for notification
-                self.stock_changes[pid] = {
-                    "pid": pid,
-                    "title": result["title"],
-                    "price": result["price"],
-                    "url": result["url"],
-                    "image": result["image"],
-                    "in_stock": in_stock,
-                    "previous_status": previous_status,
-                    "change_time": current_time,
-                    "stores": result["stores"] if in_stock else []
-                }
-
-        # Update or add product in cache
+        # Update product data
         self.products[pid] = {
             "pid": pid,
-            "title": result["title"] or self.products.get(pid, {}).get("title", ""),
-            "price": result["price"] or self.products.get(pid, {}).get("price", ""),
-            "url": result["url"] or self.products.get(pid, {}).get("url", ""),
-            "image": result["image"] or self.products.get(pid, {}).get("image", ""),
-            "in_stock": in_stock,
-            "first_seen": self.products.get(pid, {}).get("first_seen", current_time),
+            "title": result["title"] or previous_product.get("title", ""),
+            "price": result["price"] or previous_product.get("price", ""),
+            "url": result["url"] or previous_product.get("url", ""),
+            "image": result["image"] or previous_product.get("image", ""),
+            "in_stock": result["in_stock"],
+            "first_seen": previous_product.get("first_seen", current_time),
             "last_check": current_time,
-            "last_in_stock": current_time if in_stock else self.products.get(pid, {}).get("last_in_stock"),
-            "last_out_of_stock": current_time if not in_stock else self.products.get(pid, {}).get("last_out_of_stock"),
-            "stores": result["stores"] if in_stock else []
+            "last_in_stock": current_time if result["in_stock"] else previous_product.get("last_in_stock"),
+            "last_out_of_stock": current_time if not result["in_stock"] else previous_product.get("last_out_of_stock"),
+            "stores": result["stores"]
         }
 
-        return is_new or stock_changed
+        return new_stores
 
     def scan_new_items(self, proxy: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
