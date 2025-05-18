@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # Add project root to path to fix import issues
@@ -213,6 +214,52 @@ class Booksamillion:
             logger.debug(f"Saved {len(self.products)} products to cache")
         except Exception as e:
             logger.error(f"Error saving products to file: {str(e)}")
+
+    def get_store_stock_qty(self, pid: str) -> Optional[int]:
+        """
+        Get real-time stock quantity for a product at a specific store
+
+        Args:
+            pid: Product ID
+
+        Returns:
+            int: Stock quantity if available, None otherwise
+        """
+        try:
+            # Build the payload for the request
+            payload = f"https%3A%2F%2Fwww.booksamillion.com%2Fcart%3Faction=add&buyit={pid}&action=add_to_modal_cart"
+
+            # Set headers for the request
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": f"https://www.booksamillion.com/p/{pid}",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+
+            # Make the POST request
+            response = self.cf_bypass.post(
+                "https://www.booksamillion.com/add_to_modal_cart",
+                data=payload,
+                headers=headers,
+                timeout=self.config.get("timeout", 30)
+            )
+
+            # Check if the request was successful
+            if response.status_code == 200:
+                # Parse the JSON response
+                try:
+                    data = response.json()
+                    # Extract the storeOnhand value
+                    stock_qty = data.get("storeOnhand")
+                    if stock_qty is not None:
+                        return int(stock_qty)
+                except (json.JSONDecodeError, ValueError):
+                    logger.error(f"Failed to parse storeOnhand from response: {response.text}")
+
+            return None
+        except Exception as e:
+            logger.error(f"Error getting stock quantity for {pid}: {str(e)}")
+            return None
 
     def check_stock(self, pid: str = None, proxy: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
@@ -446,7 +493,13 @@ class Booksamillion:
                             "phone": store.get('PhoneNumber', ''),
                             "distance": store.get('Distance', ''),
                             "quantity": store.get('ShowQty', ''),  # Stock quantity if available
+                            "availability": availability,
                         }
+
+                        # Get real-time stock quantity for in-stock items
+                        stock_qty = self.get_store_stock_qty(pid)
+                        if stock_qty is not None:
+                            store_info["stock_qty"] = stock_qty
 
                         result["stores"].append(store_info)
 
@@ -470,19 +523,57 @@ class Booksamillion:
         current_time = datetime.now().isoformat()
         previous_product = self.products.get(pid, {})
 
-        previous_stores = {s["store_id"]: s.get("availability", "") for s in previous_product.get("stores", [])}
-        new_stores = []
+        # Get previous stores data to detect changes
+        previous_stores = {}
+        for s in previous_product.get("stores", []):
+            store_id = s.get("store_id")
+            if store_id:
+                previous_stores[store_id] = {
+                    "availability": s.get("availability", ""),
+                    "stock_qty": s.get("stock_qty")
+                }
+
+        stores_with_changes = []
 
         for store in result.get("stores", []):
             store_id = store.get("store_id")
-            prev = previous_stores.get(store_id)
-            curr = store.get("availability", "").upper()
+            if not store_id:
+                continue
 
-            if curr != prev:
-                change_str = f"{self._emoji_for_status(prev)} -> {self._emoji_for_status(curr)}"
-                store["status_change"] = change_str
+            prev_data = previous_stores.get(store_id, {})
+            prev_availability = prev_data.get("availability", "")
+            prev_stock_qty = prev_data.get("stock_qty")
+
+            curr_availability = store.get("availability", "").upper()
+            curr_stock_qty = store.get("stock_qty")
+
+            # Detect changes in availability or stock quantity
+            if curr_availability != prev_availability or curr_stock_qty != prev_stock_qty:
+                # Determine the event type
+                event_type = "new_item"
+                if prev_availability:
+                    if curr_availability in ['IN STOCK', 'LIMITED STOCK'] and prev_availability not in ['IN STOCK',
+                                                                                                        'LIMITED STOCK']:
+                        event_type = "restocked"
+                    elif curr_availability not in ['IN STOCK', 'LIMITED STOCK'] and prev_availability in ['IN STOCK',
+                                                                                                          'LIMITED STOCK']:
+                        event_type = "oos"
+                    elif curr_stock_qty is not None and prev_stock_qty is not None and curr_stock_qty != prev_stock_qty:
+                        event_type = "restocked"  # Use restocked event type for quantity changes
+
+                # Create status change string with emojis
+                prev_emoji = self._emoji_for_status(prev_availability)
+                curr_emoji = self._emoji_for_status(curr_availability)
+                status_change = f"{prev_emoji} → {curr_emoji}"
+
+                # Add store to the list of changed stores
+                store["event_type"] = event_type
+                store["status_change"] = status_change
+                store["previous_availability"] = prev_availability
+                store["previous_stock_qty"] = prev_stock_qty
                 store["last_restocks"] = datetime.now().strftime("%B %d, %Y at %I:%M %p")
-                new_stores.append(store)
+
+                stores_with_changes.append(store)
 
         # Update product data
         self.products[pid] = {
@@ -499,7 +590,7 @@ class Booksamillion:
             "stores": result["stores"]
         }
 
-        return new_stores
+        return stores_with_changes
 
     def scan_new_items(self, proxy: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
@@ -665,6 +756,158 @@ class Booksamillion:
 
         return products
 
+    def build_embed(self, product: dict, store: dict, event_type: str) -> dict:
+        """
+        Build a Discord embed for a product stock event
+
+        Args:
+            product: Dictionary containing product information
+            store: Dictionary containing store information
+            event_type: Event type ('new_item', 'restocked', 'oos')
+
+        Returns:
+            Dictionary representing a Discord embed
+        """
+        # Extract product details
+        pid = product.get("pid", "")
+        price = product.get("price", "")
+        if price and not str(price).startswith('$'):
+            price = f"${price}"
+        title = product.get("title", "")
+        url = product.get("url", "")
+        image = product.get("image", "")
+
+        # Extract store details
+        store_name = store.get("name", "") or store.get("city", "")
+        store_phone = store.get("phone", "")
+        address = store.get("address", "")
+        city = store.get("city", "")
+        state = store.get("state", "")
+        zip_code = store.get("zip", "")
+
+        # Format stock quantity
+        curr_stock_qty = store.get("stock_qty", 0)
+        prev_stock_qty = store.get("previous_stock_qty", 0)
+
+        # Format store address for code block
+        formatted_address = f"{address}\n{city}, {state} {zip_code}"
+
+        # Get current timestamp
+        now = datetime.now()
+        timestamp = store.get("last_restocks", now.strftime("%B %d, %Y at %I:%M %p"))
+        time_footer = now.strftime("%I:%M %p")
+
+        # Build fields based on event type
+        fields = []
+
+        # SKU/Price fields are common to all event types
+        fields.extend([
+            {
+                "name": "**SKU**:",
+                "value": pid,
+                "inline": True
+            },
+            {
+                "name": "‎",  # Invisible character for spacing
+                "value": "‎",
+                "inline": True
+            },
+            {
+                "name": "**Price**:",
+                "value": price,
+                "inline": True
+            }
+        ])
+
+        # Store Name/Phone fields are common to all event types
+        fields.extend([
+            {
+                "name": "**Store Name**:",
+                "value": store_name,
+                "inline": True
+            },
+            {
+                "name": "‎",  # Invisible character for spacing
+                "value": "‎",
+                "inline": True
+            },
+            {
+                "name": "**Store Phone**:",
+                "value": store_phone,
+                "inline": True
+            }
+        ])
+
+        # Stock quantity field depends on event type
+        if event_type == "new_item":
+            fields.append({
+                "name": "**Stock**:",
+                "value": str(curr_stock_qty) if curr_stock_qty is not None else "0"
+            })
+            fields.append({
+                "name": "**Added**",
+                "value": timestamp
+            })
+        elif event_type == "restocked":
+            stock_change = f"{prev_stock_qty if prev_stock_qty is not None else 0} → {curr_stock_qty if curr_stock_qty is not None else 0}"
+            fields.append({
+                "name": "**Stock**:",
+                "value": stock_change
+            })
+            fields.append({
+                "name": f"**Last Restock** {store.get('status_change', '🟡 → 🟢')}",
+                "value": timestamp
+            })
+        elif event_type == "oos":
+            stock_change = f"{prev_stock_qty if prev_stock_qty is not None else 1} → 0"
+            fields.append({
+                "name": "**Stock**:",
+                "value": stock_change
+            })
+            fields.append({
+                "name": "🔴 **Item Removed**",
+                "value": timestamp
+            })
+
+        # Store address field is common to all event types
+        fields.append({
+            "name": "**Store Address**",
+            "value": f"```{formatted_address}```"
+        })
+
+        # Set author name based on event type
+        if event_type == "new_item":
+            author_name = "New Item"
+        elif event_type == "restocked":
+            author_name = "Item Restocked"
+        elif event_type == "oos":
+            author_name = "🔴 Item OOS"
+        else:
+            author_name = "Stock Update"
+
+        # Build the embed
+        embed = {
+            "title": title,
+            "url": url,
+            "color": 5814783,  # Blue color
+            "fields": fields,
+            "author": {
+                "name": author_name
+            },
+            "footer": {
+                "text": f"1Tap Monitors • Books a million • {time_footer}"
+            },
+            "timestamp": now.isoformat()
+        }
+
+        # Add thumbnail if image URL available
+        if image:
+            embed["thumbnail"] = {
+                "url": image
+            }
+
+        return embed
+
     def format_discord_message(self, product: Dict[str, Any], is_new: bool = False) -> Dict[str, Any]:
         """
         Format product information for Discord webhook
@@ -674,80 +917,43 @@ class Booksamillion:
             is_new: Whether this is a new product notification
 
         Returns:
-            Formatted Discord message
+            Formatted Discord message with embeds
         """
-        # Determine title prefix based on notification type
-        if is_new:
-            title = f"New Item: {product.get('title', 'Unknown Product')}"
-        elif product.get('in_stock', False):
-            title = f"🟢 IN STOCK: {product.get('title', 'Unknown Product')}"
+        # Get stores from the product
+        stores = product.get("stores", [])
+        embeds = []
+
+        if stores:
+            for store in stores:
+                # Determine event type
+                event_type = store.get("event_type", "restocked")
+                if is_new:
+                    event_type = "new_item"
+
+                # Build embed for this store
+                embed = self.build_embed(product, store, event_type)
+                embeds.append(embed)
         else:
-            title = f"🔴 OUT OF STOCK: {product.get('title', 'Unknown Product')}"
-
-        # Build description
-        description = []
-
-        if is_new:
-            description.append(f"A new Pokemon product has been added to Books-A-Million!")
-
-        if product.get('price'):
-            description.append(f"Price: ${product.get('price')}")
-
-        # Add SKU/PID
-        description.append(f"SKU: {product.get('pid')}")
-
-        # Add search term if it's a new product
-        if is_new:
-            description.append(f"Search Term: pokemon")
-
-        # Add store information for in-stock products
-        if product.get('in_stock', False) and product.get('stores'):
-            description.append("\n**Available at these stores:**")
-
-            for store in product.get('stores')[:5]:  # Limit to 5 stores to avoid too long message
-                store_line = f"• {store.get('name', '')}: {store.get('address', '')}, {store.get('city', '')}, {store.get('state', '')} {store.get('zip', '')}"
-                if store.get('quantity'):
-                    store_line += f" (Qty: {store.get('quantity')})"
-                description.append(store_line)
-
-            if len(product.get('stores', [])) > 5:
-                description.append(f"...and {len(product.get('stores', [])) - 5} more stores")
-
-        # Add links
-        links = [
-            f"[eBay](https://www.ebay.com/sch/i.html?_nkw={product.get('pid')})",
-            f"[Amazon](https://www.amazon.com/s?k={product.get('pid')})",
-            f"[Walmart](https://www.walmart.com/search/?query={product.get('pid')})",
-            f"[Keepa](https://keepa.com/#!search/amazon-{product.get('pid')})",
-            f"[SellerAmp](https://selleramp.com/search?query={product.get('pid')})",
-            f"[Google](https://www.google.com/search?q={product.get('pid')})"
-        ]
-
-        description.append("\n**Links:**")
-        description.append(" - ".join(links))
-
-        # Create embed
-        embed = {
-            "title": title,
-            "description": "\n".join(description),
-            "color": 5814783 if product.get('in_stock', False) else 15158332,
-            # Green for in stock, red for out of stock
-            "url": product.get('url', ''),
-            "timestamp": datetime.now().isoformat(),
-            "footer": {
-                "text": "FastBreakCards Monitors • Books a million • " + datetime.now().strftime("%I:%M:%S %p EST")
+            # Handle out of stock products with no stores
+            event_type = "oos"
+            store = {
+                "name": "Unknown",
+                "phone": "",
+                "address": "",
+                "city": "",
+                "state": "",
+                "zip": "",
+                "previous_stock_qty": 1,
+                "stock_qty": 0,
+                "status_change": "🟢 → 🔴",
+                "last_restocks": datetime.now().strftime("%B %d, %Y at %I:%M %p")
             }
-        }
-
-        # Add thumbnail if image URL available
-        if product.get('image'):
-            embed["thumbnail"] = {
-                "url": product.get('image')
-            }
+            embed = self.build_embed(product, store, event_type)
+            embeds.append(embed)
 
         return {
-            "username": "FastBreakCards Monitors",
-            "embeds": [embed]
+            "username": "1Tap Monitors",
+            "embeds": embeds
         }
 
     def send_discord_notification(self, product: Dict[str, Any], is_new: bool = False) -> bool:
