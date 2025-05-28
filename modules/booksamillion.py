@@ -12,7 +12,7 @@ import time
 import logging
 import random
 import base64  # Added for base64 decoding
-from datetime import datetime
+import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 from urllib.parse import urlparse  # Added for extracting file extensions
@@ -143,6 +143,9 @@ class Booksamillion:
         # Track products that have already been notified
         self.notified_products = set()
 
+        # Load previously notified products
+        self._load_notified_products()
+
         logger.info(f"Initialized {self.NAME} module v{self.VERSION}")
         logger.info(f"Loaded {len(self.products)} products from cache")
         logger.info(
@@ -249,9 +252,93 @@ class Booksamillion:
                 with open("data/booksamillion_notified.json", 'r') as f:
                     self.notified_products = set(json.load(f))
                 logger.debug(f"Loaded {len(self.notified_products)} notified product IDs")
+
+                # Clean up old notification records (older than 30 days)
+                self._cleanup_old_notifications()
         except Exception as e:
             logger.error(f"Error loading notified products: {str(e)}")
             self.notified_products = set()
+
+    def _cleanup_old_notifications(self):
+        """Remove notification records older than 30 days to prevent file bloat"""
+        try:
+            current_date = datetime.datetime.now()
+            cutoff_date = current_date - datetime.timedelta(days=30)
+
+            initial_count = len(self.notified_products)
+            cleaned_products = set()
+
+            for notification_key in self.notified_products:
+                try:
+                    # Extract date from notification key (format: "PID:YYYY-MM-DD")
+                    if ":" in notification_key:
+                        date_str = notification_key.split(":", 1)[1]
+                        notification_date = datetime.datetime.strptime(date_str, '%Y-%m-%d')
+
+                        # Keep notifications newer than cutoff date
+                        if notification_date >= cutoff_date:
+                            cleaned_products.add(notification_key)
+                except (ValueError, IndexError):
+                    # Keep malformed entries (shouldn't happen but be safe)
+                    cleaned_products.add(notification_key)
+
+            removed_count = initial_count - len(cleaned_products)
+            if removed_count > 0:
+                self.notified_products = cleaned_products
+                self._save_notified_products()
+                logger.info(f"Cleaned up {removed_count} old notification records (older than 30 days)")
+
+        except Exception as e:
+            logger.error(f"Error cleaning up old notifications: {str(e)}")
+
+    def _is_product_new(self, pid):
+        """
+        Check if a product is truly new (not in database and not previously notified)
+
+        Args:
+            pid: Product ID
+
+        Returns:
+            bool: True if product is new, False otherwise
+        """
+        # Check if product exists in database
+        if pid in self.products:
+            logger.debug(f"Product {pid} already exists in database")
+            return False
+
+        # Check if product was already notified (any time, not just today)
+        for notified_key in self.notified_products:
+            if notified_key.startswith(f"{pid}:"):
+                logger.debug(f"Product {pid} was already notified previously")
+                return False
+
+        return True
+
+    def _should_send_notification(self, pid, notification_type="stock_change"):
+        """
+        Determine if a notification should be sent for a product
+
+        Args:
+            pid: Product ID
+            notification_type: Type of notification ("new_item", "stock_change")
+
+        Returns:
+            bool: True if notification should be sent, False otherwise
+        """
+        current_date = datetime.datetime.now().strftime('%Y-%m-%d')
+
+        if notification_type == "new_item":
+            # For new items, check if it's truly new
+            if not self._is_product_new(pid):
+                return False
+
+        # Check if already notified today
+        today_key = f"{pid}:{current_date}"
+        if today_key in self.notified_products:
+            logger.debug(f"Product {pid} already notified today")
+            return False
+
+        return True
 
     def upload_image_to_discord(self, pid, image_url):
         """
@@ -697,7 +784,7 @@ class Booksamillion:
             "image": "",
             "in_stock": False,
             "stores": [],
-            "check_time": datetime.now().isoformat()
+            "check_time": datetime.datetime.now().isoformat()
         }
 
         # Get zip code and radius from config - use defaults if not specified
@@ -878,7 +965,7 @@ class Booksamillion:
 
     def _update_product(self, result):
         pid = result["pid"]
-        current_time = datetime.now().isoformat()
+        current_time = datetime.datetime.now().isoformat()
         previous_product = self.products.get(pid, {})
 
         # Get previous stores data to detect changes
@@ -929,7 +1016,7 @@ class Booksamillion:
                 store["status_change"] = status_change
                 store["previous_availability"] = prev_availability
                 store["previous_stock_qty"] = prev_stock_qty
-                store["last_restocks"] = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+                store["last_restocks"] = datetime.datetime.now().strftime("%B %d, %Y at %I:%M %p")
 
                 stores_with_changes.append(store)
 
@@ -1016,11 +1103,16 @@ class Booksamillion:
                 for product in products:
                     pid = product.get("pid")
 
-                    # Skip if no PID or already in database
-                    if not pid or pid in self.products:
+                    # Skip if no PID
+                    if not pid:
                         continue
 
-                    logger.info(f"Found new product: {product.get('title')} (PID: {pid})")
+                    # Use the enhanced check to see if this is truly a new product
+                    if not self._is_product_new(pid):
+                        logger.debug(f"Skipping product {pid} - already exists in database or was previously notified")
+                        continue
+
+                    logger.info(f"Found NEW product: {product.get('title')} (PID: {pid})")
 
                     # Try to upload the image to Discord CDN if available
                     if product.get("image"):
@@ -1029,7 +1121,7 @@ class Booksamillion:
                             product["cdn_image"] = cdn_image
 
                     # Add to the products dictionary
-                    current_time = datetime.now().isoformat()
+                    current_time = datetime.datetime.now().isoformat()
                     self.products[pid] = {
                         "pid": pid,
                         "title": product.get("title", ""),
@@ -1048,7 +1140,7 @@ class Booksamillion:
             except Exception as e:
                 logger.error(f"Error scanning URL {url}: {str(e)}")
 
-        logger.info(f"Found {len(new_products)} new products")
+        logger.info(f"Found {len(new_products)} truly new products")
 
         # Save updated product data
         if new_products:
@@ -1194,7 +1286,7 @@ class Booksamillion:
         formatted_address = f"{address}\n{city}, {state} {zip_code}"
 
         # Get current timestamp
-        now = datetime.now()
+        now = datetime.datetime.now()
         timestamp = store.get("last_restocks", now.strftime("%B %d, %Y at %I:%M %p"))
         time_footer = now.strftime("%m-%d-%Y %H:%M")  # Changed to MM-DD-YYYY HH:MM format
 
@@ -1397,10 +1489,10 @@ class Booksamillion:
         """Send Discord notification for product"""
         pid = product.get("pid")
 
-        # Check if this product has already been notified
-        product_store_key = f"{pid}:{datetime.now().strftime('%Y-%m-%d')}"
-        if product_store_key in self.notified_products and not is_new:
-            logger.info(f"Skipping notification for {pid} as it has already been notified today")
+        # Use the enhanced notification check
+        notification_type = "new_item" if is_new else "stock_change"
+        if not self._should_send_notification(pid, notification_type):
+            logger.info(f"Skipping notification for {pid} - duplicate prevention triggered")
             return False
 
         # First check module-specific webhook from config
@@ -1439,6 +1531,7 @@ class Booksamillion:
             if response.status_code == 204:
                 logger.info(f"Discord notification sent for {product.get('pid')}")
                 # Mark this product as notified
+                product_store_key = f"{pid}:{datetime.now().strftime('%Y-%m-%d')}"
                 self.notified_products.add(product_store_key)
                 self._save_notified_products()
                 return True
@@ -1458,6 +1551,7 @@ class Booksamillion:
                     if retry_response.status_code == 204:
                         logger.info(f"Discord notification sent with limited embeds for {product.get('pid')}")
                         # Mark this product as notified
+                        product_store_key = f"{pid}:{datetime.now().strftime('%Y-%m-%d')}"
                         self.notified_products.add(product_store_key)
                         self._save_notified_products()
                         return True
@@ -1493,15 +1587,14 @@ class Booksamillion:
             # Step 1: Scan for new products
             new_products = self.scan_new_items(proxy=proxy)
 
-            # Step 2: Send notifications for new products
+            # Step 2: Send notifications for new products (only truly new ones)
             for product in new_products:
-                # Use the notifier module if available, otherwise use internal Discord notification
                 product_id = product.get('pid')
                 if product_id:
-                    # Check if this is actually new (not in the notified_products set)
-                    product_store_key = f"{product_id}:{datetime.now().strftime('%Y-%m-%d')}"
+                    # Check if this should be notified as a new item
+                    if self._should_send_notification(product_id, "new_item"):
+                        logger.info(f"Sending NEW ITEM notification for {product_id}")
 
-                    if product_store_key not in self.notified_products:
                         if notifier:
                             notifier.send_alert(
                                 title=f"New Pokemon Product: {product.get('title', 'Unknown')}",
@@ -1514,50 +1607,48 @@ class Booksamillion:
                             # Use internal Discord notification
                             self.send_discord_notification(product, is_new=True)
                     else:
-                        logger.info(f"Skipping notification for already notified product: {product_id}")
+                        logger.info(
+                            f"Skipping new item notification for {product_id} - already exists or previously notified")
 
             # Step 3: Check stock for existing products
             results = self.check_stock(proxy=proxy)
 
-            # Step 4: Send notifications for stock changes
+            # Step 4: Send notifications for stock changes (only for valid changes)
             for pid, change_info in self.stock_changes.items():
                 logger.info(f"Processing stock change for {pid}")
 
-                # Create a unique key for this product using pid + date
-                product_store_key = f"{pid}:{datetime.now().strftime('%Y-%m-%d')}"
+                # Check if this stock change should be notified
+                if self._should_send_notification(pid, "stock_change"):
+                    logger.info(f"Sending STOCK CHANGE notification for {pid}")
 
-                # Skip if this product was already notified today
-                if product_store_key in self.notified_products:
-                    logger.info(f"Skipping notification for {pid} as it has already been notified today")
-                    continue
+                    # Make sure to send to both notifier and webhook
+                    # First try the notifier module if available
+                    if notifier:
+                        if change_info.get('in_stock', False):
+                            notifier.send_alert(
+                                title=f"🟢 NOW IN STOCK: {change_info.get('title', 'Unknown')}",
+                                description=f"This Pokemon product is now IN STOCK at Books-A-Million!\nPrice: ${change_info.get('price', 'Unknown')}\nAvailable at {len(change_info.get('stores', []))} stores",
+                                url=change_info.get('url', ''),
+                                image=change_info.get('cdn_image', change_info.get('image', '')),
+                                store=self.NAME
+                            )
+                        else:
+                            notifier.send_alert(
+                                title=f"🔴 OUT OF STOCK: {change_info.get('title', 'Unknown')}",
+                                description=f"This Pokemon product is now OUT OF STOCK at Books-A-Million\nPrice: ${change_info.get('price', 'Unknown')}",
+                                url=change_info.get('url', ''),
+                                image=change_info.get('cdn_image', change_info.get('image', '')),
+                                store=self.NAME
+                            )
 
-                # Make sure to send to both notifier and webhook
-                # First try the notifier module if available
-                if notifier:
-                    if change_info.get('in_stock', False):
-                        notifier.send_alert(
-                            title=f"🟢 NOW IN STOCK: {change_info.get('title', 'Unknown')}",
-                            description=f"This Pokemon product is now IN STOCK at Books-A-Million!\nPrice: ${change_info.get('price', 'Unknown')}\nAvailable at {len(change_info.get('stores', []))} stores",
-                            url=change_info.get('url', ''),
-                            image=change_info.get('cdn_image', change_info.get('image', '')),
-                            store=self.NAME
-                        )
+                    # Always send through the internal webhook too as a backup
+                    success = self.send_discord_notification(change_info)
+                    if success:
+                        logger.info(f"Successfully sent Discord notification for {pid}")
                     else:
-                        notifier.send_alert(
-                            title=f"🔴 OUT OF STOCK: {change_info.get('title', 'Unknown')}",
-                            description=f"This Pokemon product is now OUT OF STOCK at Books-A-Million\nPrice: ${change_info.get('price', 'Unknown')}",
-                            url=change_info.get('url', ''),
-                            image=change_info.get('cdn_image', change_info.get('image', '')),
-                            store=self.NAME
-                        )
-
-                # Always send through the internal webhook too as a backup
-                success = self.send_discord_notification(change_info)
-                if success:
-                    logger.info(f"Successfully sent Discord notification for {pid}")
-                    # Mark as notified (already done in send_discord_notification)
+                        logger.error(f"Failed to send Discord notification for {pid}")
                 else:
-                    logger.error(f"Failed to send Discord notification for {pid}")
+                    logger.info(f"Skipping stock change notification for {pid} - already notified today")
 
             # Clear stock changes after notifications
             self.stock_changes = {}
@@ -1602,22 +1693,66 @@ if __name__ == "__main__":
     # Create module instance
     monitor = Booksamillion()
 
-    # Scan for new products
-    new_products = monitor.scan_new_items()
-    print(f"Found {len(new_products)} new products")
+    print(f"Starting Books-A-Million Pokemon stock monitoring (Press CTRL+C to exit)")
+    print(f"Monitoring interval set to {monitor.INTERVAL} seconds")
 
-    # Check stock for products
-    results = monitor.check_stock()
-    monitor._save_products()
-    print(f"Checked stock for {len(results)} products")
+    try:
+        # Run the initial monitoring cycle immediately
+        print("\n=== Starting initial monitoring cycle ===")
+        # Scan for new products
+        new_products = monitor.scan_new_items()
+        print(f"Found {len(new_products)} new products")
 
-    # Send webhook for all in-stock items (test mode)
-    for product in results:
-        if product.get("in_stock"):
-            print(f"Sending Discord test webhook for {product['pid']}")
-            monitor.send_discord_notification(product, is_new=True)
+        # Check stock for products
+        results = monitor.check_stock()
+        monitor._save_products()
+        print(f"Checked stock for {len(results)} products")
 
-    # Display in-stock products
-    for product in results:
-        if product.get('in_stock'):
-            print(f"IN STOCK: {product.get('title')} at {len(product.get('stores', []))} stores")
+        # Display in-stock products
+        in_stock_count = 0
+        for product in results:
+            if product.get('in_stock'):
+                print(f"IN STOCK: {product.get('title')} at {len(product.get('stores', []))} stores")
+                in_stock_count += 1
+
+        if in_stock_count == 0:
+            print("No products currently in stock")
+
+        # Enter continuous monitoring loop
+        while True:
+            # Get the interval from configuration or use default
+            interval = monitor.config.get("interval", monitor.INTERVAL)
+
+            # Calculate next run time
+            next_run = datetime.now() + datetime.timedelta(seconds=interval)
+            print(f"\n=== Next monitoring cycle will start at {next_run.strftime('%Y-%m-%d %H:%M:%S')} ===")
+            print(f"Sleeping for {interval} seconds...")
+
+            # Sleep until next interval
+            time.sleep(interval)
+
+            print("\n=== Starting new monitoring cycle ===")
+
+            try:
+                # Run the full monitor loop which includes scanning for new items
+                # and checking stock for existing items
+                monitor.main_monitor_loop()
+
+                # Save current state
+                monitor._save_products()
+                monitor._save_notified_products()
+            except Exception as e:
+                logger.error(f"Error in monitoring cycle: {str(e)}")
+                # Sleep for a bit before trying again to avoid rapid retries on persistent errors
+                time.sleep(60)
+
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped by user. Exiting...")
+    except Exception as e:
+        logger.critical(f"Fatal error in main loop: {str(e)}")
+        print(f"\nFatal error: {str(e)}")
+    finally:
+        # Save state before exiting
+        monitor._save_products()
+        monitor._save_notified_products()
+        print("Monitoring stopped. Product data saved.")
