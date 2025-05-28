@@ -15,7 +15,13 @@ import datetime
 import logging
 import logging.handlers
 from pathlib import Path
+from modules.booksamillion import Booksamillion
 from typing import Dict, List, Optional, Any
+from dotenv import load_dotenv
+
+load_dotenv()
+bam = Booksamillion()
+bam.main_monitor_loop()
 
 # Add project root to path to fix import issues
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -40,26 +46,35 @@ except ImportError:
     Back = DummyColor()
     Style = DummyColor()
 
-# Import project modules
-from dispatcher import ModuleDispatcher
-from proxy_manager import ProxyManager
-from notifier import DiscordNotifier
 
-
-# Create __init__.py files if they don't exist to make proper Python packages
-def ensure_package_files():
-    """Ensure __init__.py files exist for proper Python package structure"""
+def ensure_package_structure():
+    """Ensure the package structure exists to avoid import issues"""
     package_dirs = [
         '',  # Root directory
         'utils',
-        'modules'
+        'modules',
+        'config',
+        'config/modules',
+        'data',
+        'logs',
+        'logs/requests'
     ]
 
     for directory in package_dirs:
-        init_file = Path(directory) / '__init__.py'
-        if not init_file.exists():
+        directory_path = Path(directory)
+
+        # Create directory if it doesn't exist
+        if not directory_path.exists():
             try:
-                init_file.parent.mkdir(exist_ok=True)
+                directory_path.mkdir(exist_ok=True, parents=True)
+                print(f"Created directory {directory_path}")
+            except Exception as e:
+                print(f"Warning: Could not create directory {directory_path}: {e}")
+
+        # Create __init__.py if it doesn't exist
+        init_file = directory_path / '__init__.py'
+        if directory and not init_file.exists():
+            try:
                 with open(init_file, 'w') as f:
                     f.write("# This file makes the directory a Python package\n")
                 print(f"Created {init_file}")
@@ -68,14 +83,13 @@ def ensure_package_files():
 
 
 # Call this at startup
-ensure_package_files()
+ensure_package_structure()
 
 try:
     from utils.config_loader import load_global_config
 except ImportError:
     print(f"{Fore.RED}Error: Could not import utils.config_loader.{Style.RESET_ALL}")
-    print(
-        f"{Fore.YELLOW}Make sure you have utils/__init__.py file (run this script once to create it).{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}Make sure you have utils/__init__.py file.{Style.RESET_ALL}")
     sys.exit(1)
 
 
@@ -89,6 +103,9 @@ def setup_logging(log_dir="logs"):
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
+    # Clear existing handlers to avoid duplicates
+    logger.handlers = []
+
     # Create handlers
     # Console handler
     c_handler = logging.StreamHandler()
@@ -96,30 +113,37 @@ def setup_logging(log_dir="logs"):
 
     # File handler with rotation (10MB files, keep 5 backups)
     log_file = os.path.join(log_dir, "stock_checker.log")
-    f_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=10 * 1024 * 1024, backupCount=5
-    )
-    f_handler.setLevel(logging.INFO)
+    try:
+        f_handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 * 1024, backupCount=5
+        )
+        f_handler.setLevel(logging.INFO)
+    except Exception as e:
+        print(f"Warning: Could not create log file handler: {e}")
+        f_handler = None
 
     # Create formatters and add to handlers
     log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     c_formatter = logging.Formatter(log_format)
-    f_formatter = logging.Formatter(log_format)
     c_handler.setFormatter(c_formatter)
-    f_handler.setFormatter(f_formatter)
-
-    # Add handlers to the logger
     logger.addHandler(c_handler)
-    logger.addHandler(f_handler)
+
+    if f_handler:
+        f_formatter = logging.Formatter(log_format)
+        f_handler.setFormatter(f_formatter)
+        logger.addHandler(f_handler)
 
     # Create request logs directory for detailed request logs
     req_log_dir = os.path.join(log_dir, "requests")
     os.makedirs(req_log_dir, exist_ok=True)
 
-    # Set up request log rotation
-    from utils.request_logger import get_request_logger
-    request_logger = get_request_logger()
-    request_logger.enable_log_rotation(max_bytes=5 * 1024 * 1024, backup_count=3)
+    # Set up request log rotation if the module is available
+    try:
+        from utils.request_logger import get_request_logger
+        request_logger = get_request_logger()
+        request_logger.enable_log_rotation(max_bytes=5 * 1024 * 1024, backup_count=3)
+    except ImportError:
+        print(f"Warning: utils.request_logger not available")
 
     return logger
 
@@ -153,14 +177,32 @@ def load_config():
                 "interval": 300  # 5 minutes
             }
 
-        # Ensure directories exist
-        for directory in ['config', 'config/modules', 'data', 'logs', 'logs/requests']:
-            os.makedirs(directory, exist_ok=True)
-
         return config
     except Exception as e:
         print(f"{Fore.RED}Error loading configuration: {str(e)}{Style.RESET_ALL}")
-        sys.exit(1)
+        # Create default configuration
+        default_config = {
+            "discord_webhook": "",
+            "check_interval": 60,  # Default check interval in seconds
+            "modules": {
+                "booksamillion": {"enabled": True, "interval": 300},
+            },
+            "use_proxies": True,
+            "gui_enabled": False
+        }
+
+        # Ensure config directory exists
+        os.makedirs("config", exist_ok=True)
+
+        # Write default config
+        try:
+            with open('config/global.json', 'w') as f:
+                json.dump(default_config, f, indent=4)
+            print(f"{Fore.GREEN}Created default configuration{Style.RESET_ALL}")
+            return default_config
+        except Exception as write_err:
+            print(f"{Fore.RED}Error creating default configuration: {str(write_err)}{Style.RESET_ALL}")
+            sys.exit(1)
 
 
 def signal_handler(sig, frame):
@@ -201,6 +243,45 @@ def get_module_status_color(status):
         return Fore.YELLOW
 
 
+class PerformanceMonitor:
+    """Class to handle performance monitoring without monkey patching"""
+
+    def __init__(self, metrics):
+        self.metrics = metrics
+        self._install_hooks()
+
+    def _install_hooks(self):
+        """Install monitoring hooks safely"""
+        # We'll use a more structured approach than monkey patching
+        self.original_methods = {}
+
+        # Record module runtime
+        self.start_times = {}
+
+    def record_cookie_refresh(self):
+        """Record a cookie refresh event"""
+        self.metrics["cookie_refreshes"] += 1
+
+    def record_request_success(self):
+        """Record a successful request"""
+        self.metrics["successful_requests"] += 1
+
+    def record_request_failure(self):
+        """Record a failed request"""
+        self.metrics["request_failures"] += 1
+
+    def record_module_start(self, module_name):
+        """Record when a module starts running"""
+        self.start_times[module_name] = time.time()
+
+    def record_module_end(self, module_name):
+        """Record when a module finishes running"""
+        if module_name in self.start_times:
+            runtime = time.time() - self.start_times[module_name]
+            self.metrics["last_runtime"][module_name] = runtime
+            del self.start_times[module_name]
+
+
 def status_display_thread():
     """Thread to continuously update status display"""
     global running
@@ -238,7 +319,7 @@ def status_display_thread():
         print(f"Successful Requests: {metrics['successful_requests']}")
         if metrics['request_failures'] > 0:
             failure_rate = metrics['request_failures'] / (
-                        metrics['request_failures'] + metrics['successful_requests']) * 100
+                    metrics['request_failures'] + metrics['successful_requests']) * 100
             print(f"Failure Rate: {failure_rate:.1f}%")
         print()
 
@@ -288,18 +369,45 @@ def daemon_mode():
     print("Starting in daemon mode...")
 
     # Initialize components
-    proxy_manager = ProxyManager('proxies.txt') if config['use_proxies'] else None
-    notifier = DiscordNotifier(os.getenv('DISCORD_WEBHOOK', config.get('discord_webhook', '')))
+    try:
+        from proxy_manager import ProxyManager
+        proxy_manager = ProxyManager('proxies.txt') if config['use_proxies'] else None
+    except ImportError:
+        print(f"{Fore.YELLOW}Warning: proxy_manager module not available. Proxy support disabled.{Style.RESET_ALL}")
+        proxy_manager = None
+        config['use_proxies'] = False
+
+    try:
+        from notifier import DiscordNotifier
+        notifier = DiscordNotifier(os.getenv('DISCORD_WEBHOOK', config.get('discord_webhook', '')))
+    except ImportError:
+        print(f"{Fore.YELLOW}Warning: notifier module not available. Using dummy notifier.{Style.RESET_ALL}")
+
+        # Create a dummy notifier
+        class DummyNotifier:
+            def __init__(self, webhook_url):
+                self.webhook_url = webhook_url
+
+            def send_alert(self, title, description, url="", image="", store="Unknown"):
+                print(f"ALERT: {title} - {description}")
+                return True
+
+        notifier = DummyNotifier(os.getenv('DISCORD_WEBHOOK', config.get('discord_webhook', '')))
 
     # Create dispatcher
-    dispatcher = ModuleDispatcher(
-        notifier=notifier,
-        proxy_manager=proxy_manager,
-        config=config
-    )
+    try:
+        from dispatcher import ModuleDispatcher
+        dispatcher = ModuleDispatcher(
+            notifier=notifier,
+            proxy_manager=proxy_manager,
+            config=config
+        )
+    except ImportError:
+        print(f"{Fore.RED}Error: dispatcher module not available. Cannot continue.{Style.RESET_ALL}")
+        sys.exit(1)
 
-    # Install performance monitoring hooks
-    install_monitoring_hooks(dispatcher)
+    # Create performance monitor instead of monkey patching
+    performance_monitor = PerformanceMonitor(metrics)
 
     # Discover available modules
     dispatcher.discover_modules()
@@ -309,6 +417,8 @@ def daemon_mode():
         if module_config.get('enabled', False):
             result = dispatcher.start_module(module_name)
             print(f"Module {module_name}: {result}")
+            # Record module start for monitoring
+            performance_monitor.record_module_start(module_name)
 
     print("Daemon mode active. Press Ctrl+C to exit.")
 
@@ -333,18 +443,45 @@ def interactive_mode():
     print("Initializing components...")
 
     # Initialize components
-    proxy_manager = ProxyManager('proxies.txt') if config['use_proxies'] else None
-    notifier = DiscordNotifier(os.getenv('DISCORD_WEBHOOK', config.get('discord_webhook', '')))
+    try:
+        from proxy_manager import ProxyManager
+        proxy_manager = ProxyManager('proxies.txt') if config['use_proxies'] else None
+    except ImportError:
+        print(f"{Fore.YELLOW}Warning: proxy_manager module not available. Proxy support disabled.{Style.RESET_ALL}")
+        proxy_manager = None
+        config['use_proxies'] = False
+
+    try:
+        from notifier import DiscordNotifier
+        notifier = DiscordNotifier(os.getenv('DISCORD_WEBHOOK', config.get('discord_webhook', '')))
+    except ImportError:
+        print(f"{Fore.YELLOW}Warning: notifier module not available. Using dummy notifier.{Style.RESET_ALL}")
+
+        # Create a dummy notifier
+        class DummyNotifier:
+            def __init__(self, webhook_url):
+                self.webhook_url = webhook_url
+
+            def send_alert(self, title, description, url="", image="", store="Unknown"):
+                print(f"ALERT: {title} - {description}")
+                return True
+
+        notifier = DummyNotifier(os.getenv('DISCORD_WEBHOOK', config.get('discord_webhook', '')))
 
     # Create dispatcher
-    dispatcher = ModuleDispatcher(
-        notifier=notifier,
-        proxy_manager=proxy_manager,
-        config=config
-    )
+    try:
+        from dispatcher import ModuleDispatcher
+        dispatcher = ModuleDispatcher(
+            notifier=notifier,
+            proxy_manager=proxy_manager,
+            config=config
+        )
+    except ImportError:
+        print(f"{Fore.RED}Error: dispatcher module not available. Cannot continue.{Style.RESET_ALL}")
+        sys.exit(1)
 
-    # Install performance monitoring hooks
-    install_monitoring_hooks(dispatcher)
+    # Create performance monitor instead of monkey patching
+    performance_monitor = PerformanceMonitor(metrics)
 
     # Discover available modules
     print("Discovering modules...")
@@ -357,6 +494,8 @@ def interactive_mode():
         if module_config.get('enabled', False):
             result = dispatcher.start_module(module_name)
             print(f"  {module_name}: {result}")
+            # Record module start for monitoring
+            performance_monitor.record_module_start(module_name)
 
     # Start status display thread
     status_thread = threading.Thread(target=status_display_thread, daemon=True)
@@ -391,6 +530,8 @@ def interactive_mode():
                 module_name = parts[1]
                 result = dispatcher.start_module(module_name)
                 print(f"Module {module_name}: {result}")
+                # Record module start for monitoring
+                performance_monitor.record_module_start(module_name)
 
             elif action == "stop":
                 if len(parts) < 2:
@@ -400,6 +541,8 @@ def interactive_mode():
                 module_name = parts[1]
                 result = dispatcher.stop_module(module_name)
                 print(f"Module {module_name}: {result}")
+                # Record module end for monitoring
+                performance_monitor.record_module_end(module_name)
 
             elif action == "restart":
                 if len(parts) < 2:
@@ -408,7 +551,10 @@ def interactive_mode():
 
                 module_name = parts[1]
                 dispatcher.stop_module(module_name)
+                performance_monitor.record_module_end(module_name)
+
                 result = dispatcher.start_module(module_name)
+                performance_monitor.record_module_start(module_name)
                 print(f"Module {module_name}: {result}")
 
             elif action == "reload":
@@ -450,57 +596,6 @@ def interactive_mode():
             print(f"{Fore.RED}Error: {str(e)}{Style.RESET_ALL}")
 
 
-def install_monitoring_hooks(dispatcher_instance):
-    """Install monitoring hooks to track performance metrics"""
-    # Monkey patch the CloudflareBypass class to monitor cookie refreshes
-    from utils.cloudflare_bypass import CloudflareBypass
-    original_get_fresh_cookies = CloudflareBypass.get_fresh_cookies
-
-    def patched_get_fresh_cookies(self):
-        global metrics
-        result = original_get_fresh_cookies(self)
-        if result:
-            metrics["cookie_refreshes"] += 1
-        return result
-
-    CloudflareBypass.get_fresh_cookies = patched_get_fresh_cookies
-
-    # Monitor HTTP request successes and failures
-    from utils.cloudflare_bypass import get_cloudflare_bypass
-    bypass = get_cloudflare_bypass('https://example.com')  # Just to get an instance
-    original_get = bypass.__class__.get
-
-    def patched_get(self, url, **kwargs):
-        global metrics
-        try:
-            response = original_get(self, url, **kwargs)
-            if response.status_code < 400:
-                metrics["successful_requests"] += 1
-            else:
-                metrics["request_failures"] += 1
-            return response
-        except Exception as e:
-            metrics["request_failures"] += 1
-            raise
-
-    bypass.__class__.get = patched_get
-
-    # Monitor module runtimes
-    original_main_monitor_loop = dispatcher_instance.module_threads.__class__.run
-
-    def patched_run(self):
-        global metrics
-        module_name = self.module.__class__.__name__.lower()
-        start_time = time.time()
-        try:
-            return original_main_monitor_loop(self)
-        finally:
-            runtime = time.time() - start_time
-            metrics["last_runtime"][module_name] = runtime
-
-    dispatcher_instance.module_threads.__class__.run = patched_run
-
-
 def display_detailed_metrics():
     """Display detailed performance metrics"""
     global metrics
@@ -512,7 +607,7 @@ def display_detailed_metrics():
 
     if metrics['request_failures'] > 0:
         failure_rate = metrics['request_failures'] / (
-                    metrics['request_failures'] + metrics['successful_requests']) * 100
+                metrics['request_failures'] + metrics['successful_requests']) * 100
         print(f"Overall Failure Rate: {failure_rate:.2f}%")
 
     print(f"\n{Fore.CYAN}Module Runtimes:{Style.RESET_ALL}")
@@ -520,14 +615,20 @@ def display_detailed_metrics():
         print(f"  {module}: {runtime:.2f}s")
 
     # Get system info
-    import platform
-    import psutil
+    try:
+        import platform
+        print(f"\n{Fore.CYAN}System Information:{Style.RESET_ALL}")
+        print(f"  Python Version: {platform.python_version()}")
+        print(f"  OS: {platform.system()} {platform.release()}")
 
-    print(f"\n{Fore.CYAN}System Information:{Style.RESET_ALL}")
-    print(f"  Python Version: {platform.python_version()}")
-    print(f"  OS: {platform.system()} {platform.release()}")
-    print(f"  CPU Usage: {psutil.cpu_percent()}%")
-    print(f"  Memory Usage: {psutil.virtual_memory().percent}%")
+        try:
+            import psutil
+            print(f"  CPU Usage: {psutil.cpu_percent()}%")
+            print(f"  Memory Usage: {psutil.virtual_memory().percent}%")
+        except ImportError:
+            print("  CPU/Memory usage information not available (psutil not installed)")
+    except ImportError:
+        print("  System information not available")
 
     # Check for log file sizes
     print(f"\n{Fore.CYAN}Log Information:{Style.RESET_ALL}")
@@ -551,17 +652,17 @@ def run_module_test(module_name):
     """Run automated test for a specific module"""
     print(f"\n{Fore.CYAN}Running test for module: {module_name}{Style.RESET_ALL}")
 
-    # Check if test file exists
-    test_file = Path(f"tests/test_{module_name}.py")
-    if not test_file.exists():
-        # Create test directory if it doesn't exist
-        test_file.parent.mkdir(exist_ok=True)
+    # Create test directory if it doesn't exist
+    test_dir = Path("tests")
+    test_dir.mkdir(exist_ok=True)
 
+    # Check if test file exists
+    test_file = test_dir / f"test_{module_name}.py"
+    if not test_file.exists():
         # Generate a basic test file
         print(f"Test file not found. Creating basic test file at {test_file}")
         with open(test_file, 'w') as f:
-            f.write(f"""
-#!/usr/bin/env python3
+            f.write(f"""#!/usr/bin/env python3
 \"\"\"
 Automated tests for the {module_name} module
 \"\"\"
@@ -622,6 +723,7 @@ if __name__ == '__main__':
     # Run the test
     try:
         import subprocess
+        print(f"{Fore.CYAN}Running test: {test_file}{Style.RESET_ALL}")
         result = subprocess.run([sys.executable, str(test_file)],
                                 capture_output=True, text=True)
 
