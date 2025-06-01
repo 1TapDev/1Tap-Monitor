@@ -117,15 +117,25 @@ class Booksamillion:
         # Load configuration
         self.config = self._load_config()
 
-        # Ensure data directory exists
-        os.makedirs("data", exist_ok=True)
-        os.makedirs("logs", exist_ok=True)
-        os.makedirs("logs/requests", exist_ok=True)
+        # Get project root directory (go up from modules/booksamillion to project root)
+        self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+        # Ensure data directory exists in project root
+        self.data_dir = os.path.join(self.project_root, "data")
+        self.logs_dir = os.path.join(self.project_root, "logs")
+
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.logs_dir, exist_ok=True)
+        # Removed requests directory creation
 
         # Initialize CloudflareBypass handler
+        cookie_file = self.config.get("cookie_file", "data/booksamillion_cookies.json")
+        if not os.path.isabs(cookie_file):
+            cookie_file = os.path.join(self.project_root, cookie_file)
+
         self.cf_bypass = get_cloudflare_bypass(
             base_url="https://www.booksamillion.com",
-            cookie_file=self.config.get("cookie_file", "data/booksamillion_cookies.json"),
+            cookie_file=cookie_file,
             cookie_max_age=3600  # Keep cookies valid for 1 hour
         )
 
@@ -215,8 +225,9 @@ class Booksamillion:
 
             # Try to save default config
             try:
-                os.makedirs("config/modules", exist_ok=True)
-                with open("config/modules/booksamillion.json", "w") as f:
+                config_dir = os.path.join(self.project_root, "config", "modules")
+                os.makedirs(config_dir, exist_ok=True)
+                with open(os.path.join(config_dir, "booksamillion.json"), "w") as f:
                     json.dump(config, f, indent=2)
                 logger.info("Created default config file")
             except Exception as e:
@@ -251,7 +262,8 @@ class Booksamillion:
     def _save_notified_products(self):
         """Save notified products to prevent duplicate notifications"""
         try:
-            with open("data/booksamillion_notified.json", 'w') as f:
+            notified_file = os.path.join(self.project_root, "data", "booksamillion_notified.json")
+            with open(notified_file, 'w') as f:
                 json.dump(list(self.notified_products), f)
             logger.debug(f"Saved {len(self.notified_products)} notified product IDs")
         except Exception as e:
@@ -260,8 +272,9 @@ class Booksamillion:
     def _load_notified_products(self):
         """Load notified products to prevent duplicate notifications"""
         try:
-            if os.path.exists("data/booksamillion_notified.json"):
-                with open("data/booksamillion_notified.json", 'r') as f:
+            notified_file = os.path.join(self.project_root, "data", "booksamillion_notified.json")
+            if os.path.exists(notified_file):
+                with open(notified_file, 'r') as f:
                     self.notified_products = set(json.load(f))
                 logger.debug(f"Loaded {len(self.notified_products)} notified product IDs")
 
@@ -345,30 +358,60 @@ class Booksamillion:
 
         return True
 
-    def upload_image_to_discord(self, pid, image_url):
+    def _get_placeholder_image_path(self):
+        """Return a local placeholder image path"""
+        # Create a simple placeholder if none exists
+        images_dir = os.path.join(self.project_root, "images")
+        os.makedirs(images_dir, exist_ok=True)
+
+        placeholder_path = os.path.join(images_dir, "placeholder.png")
+
+        # Create a simple placeholder image if it doesn't exist
+        if not os.path.exists(placeholder_path):
+            try:
+                from PIL import Image, ImageDraw
+
+                # Create a simple 300x300 placeholder
+                img = Image.new('RGB', (300, 300), color='lightgray')
+                draw = ImageDraw.Draw(img)
+
+                # Add text
+                text = "No Image\nAvailable"
+                bbox = draw.textbbox((0, 0), text)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+
+                x = (300 - text_width) // 2
+                y = (300 - text_height) // 2
+                draw.text((x, y), text, fill='black')
+
+                img.save(placeholder_path)
+                logger.info(f"Created placeholder image: {placeholder_path}")
+            except Exception as e:
+                logger.warning(f"Could not create placeholder image: {str(e)}")
+
+        return placeholder_path
+
+    def save_image_locally(self, pid, image_url):
         """
-        Upload product image to Discord using webhook and return the CDN URL.
+        Download and save product image locally, return the local file path.
 
         Args:
             pid: Product ID
             image_url: Original image URL
 
         Returns:
-            Discord CDN URL if successful, None otherwise
+            Local file path if successful, placeholder path otherwise
         """
         if not pid or not image_url:
-            logger.warning(f"Missing pid or image_url, skipping Discord image upload for PID: {pid}")
-            return self._get_placeholder_image()
-
-        webhook_url = self.config.get("webhook", {}).get("image_cache_url", "")
-        if not webhook_url:
-            webhook_url = os.getenv('DISCORD_IMAGE_WEBHOOK', "")
-
-        if not webhook_url:
-            logger.warning("No webhook image cache URL configured, skipping Discord image upload")
-            return self._get_placeholder_image()
+            logger.warning(f"Missing pid or image_url, skipping image save for PID: {pid}")
+            return self._get_placeholder_image_path()
 
         try:
+            # Create images directory in project root
+            images_dir = os.path.join(self.project_root, "images")
+            os.makedirs(images_dir, exist_ok=True)
+
             # Check if this is a data URL (base64 embedded image)
             if "data:image" in image_url:
                 # Handle malformed URLs where base URL is prepended to data URL
@@ -381,7 +424,7 @@ class Booksamillion:
                     header, encoded = image_url.split(",", 1)
                     content_type = header.split(":")[1].split(";")[0]
 
-                    # Create placeholder image name based on content type
+                    # Create image file extension based on content type
                     extension = f".{content_type.split('/')[1]}"
                     if extension == ".jpeg":
                         extension = ".jpg"
@@ -389,20 +432,10 @@ class Booksamillion:
                     # Decode base64 content
                     image_content = base64.b64decode(encoded)
 
-                    # Check for tiny placeholder images or invalid content
-                    if len(image_content) < 1000:  # Increased threshold
-                        logger.warning(f"Image for {pid} is too small ({len(image_content)} bytes), using placeholder")
-                        return self._get_pokemon_card_placeholder(pid)
-
-                    # Check if image is valid by attempting to validate it
-                    if not self._is_valid_image(image_content):
-                        logger.warning(f"Image for {pid} failed validation, using placeholder")
-                        return self._get_pokemon_card_placeholder(pid)
-
                     filename = f"{pid}{extension}"
                 except Exception as e:
                     logger.error(f"Failed to decode data URL for {pid}: {str(e)}")
-                    return self._get_placeholder_image()
+                    return self._get_placeholder_image_path()
             else:
                 # Download the image
                 logger.info(f"Downloading image for {pid} from {image_url}")
@@ -420,69 +453,57 @@ class Booksamillion:
 
                 try:
                     # Always use the CloudflareBypass for image downloads
-                    # This is critical for covers.booksamillion.com which is protected
                     if not hasattr(self, 'cf_bypass') or not self.cf_bypass:
                         logger.error(f"CloudflareBypass not initialized, falling back to placeholder for {pid}")
-                        return self._get_pokemon_card_placeholder(pid)
+                        return self._get_placeholder_image_path()
 
                     # Try to download using CloudflareBypass
                     image_response = self.cf_bypass.get(
                         image_url,
                         headers=headers,
                         timeout=self.config.get("timeout", 30),
-                        enable_logging=True
+                        enable_logging=False
                     )
 
                     if image_response.status_code != 200:
                         logger.error(f"Failed to download image for {pid}: HTTP {image_response.status_code}")
-                        return self._get_pokemon_card_placeholder(pid)
+                        return self._get_placeholder_image_path()
 
-                    # Prepare the image for upload
+                    # Prepare the image for saving
                     image_content = image_response.content
-
-                    # Check for tiny placeholder images or invalid content
-                    if len(image_content) < 1000:  # Increased threshold
-                        logger.warning(f"Image for {pid} is too small ({len(image_content)} bytes), using placeholder")
-                        return self._get_pokemon_card_placeholder(pid)
-
-                    # Check if image is valid by attempting to validate it
-                    if not self._is_valid_image(image_content):
-                        logger.warning(f"Image for {pid} failed validation, using placeholder")
-                        return self._get_pokemon_card_placeholder(pid)
 
                     file_extension = self._get_file_extension(image_url)
                     filename = f"{pid}{file_extension}"
                 except Exception as e:
                     logger.error(f"Error downloading image for {pid}: {str(e)}")
-                    return self._get_pokemon_card_placeholder(pid)
+                    return self._get_placeholder_image_path()
 
-            # Final validation before upload
+            # Validate image content before saving
+            if len(image_content) < 1000:  # Too small
+                logger.warning(f"Image for {pid} is too small ({len(image_content)} bytes), using placeholder")
+                return self._get_placeholder_image_path()
+
             if not self._is_valid_image(image_content):
-                logger.warning(f"Final validation failed for {pid}, using placeholder")
-                return self._get_pokemon_card_placeholder(pid)
+                logger.warning(f"Image for {pid} failed validation, using placeholder")
+                return self._get_placeholder_image_path()
 
-            # Upload to Discord
-            logger.info(f"Uploading image for {pid} to Discord CDN")
-            files = {"file": (filename, image_content)}
-            response = requests.post(webhook_url, files=files, timeout=30)
+            # Save the image locally
+            local_path = os.path.join(images_dir, filename)
 
-            if response.status_code != 200:
-                logger.error(f"Failed to upload image to Discord: HTTP {response.status_code}")
-                return self._get_pokemon_card_placeholder(pid)
+            # Check if image already exists
+            if os.path.exists(local_path):
+                logger.debug(f"Image for {pid} already exists locally: {local_path}")
+                return local_path
 
-            # Extract the CDN URL
-            try:
-                data = response.json()
-                cdn_url = data["attachments"][0]["url"]
-                logger.info(f"Successfully uploaded image for {pid} to Discord CDN: {cdn_url}")
-                return cdn_url
-            except (KeyError, IndexError, json.JSONDecodeError) as e:
-                logger.error(f"Error extracting CDN URL from Discord response: {str(e)}")
-                return self._get_pokemon_card_placeholder(pid)
+            with open(local_path, 'wb') as f:
+                f.write(image_content)
+
+            logger.info(f"Successfully saved image for {pid} locally: {local_path}")
+            return local_path
 
         except Exception as e:
-            logger.error(f"Error uploading image to Discord for {pid}: {str(e)}")
-            return self._get_pokemon_card_placeholder(pid)
+            logger.error(f"Error saving image locally for {pid}: {str(e)}")
+            return self._get_placeholder_image_path()
 
     def _get_placeholder_image(self):
         """Return a generic placeholder image URL from Discord CDN or a default one"""
@@ -613,7 +634,7 @@ class Booksamillion:
                     image_url,
                     headers=headers,
                     timeout=self.config.get("timeout", 30),
-                    enable_logging=True
+                    enable_logging=False  # Disabled request logging
                 )
 
                 if image_response.status_code != 200:
@@ -881,8 +902,7 @@ class Booksamillion:
                     inventory_url,
                     headers=headers,
                     timeout=self.config.get("timeout", 30),
-                    enable_logging=True,
-                    log_filename=f"{pid}.log"  # Use PID for log filename
+                    enable_logging=False  # Disabled request logging
                 )
 
                 if response.status_code == 200:
@@ -953,14 +973,14 @@ class Booksamillion:
                 result["url"] = stock_data['pidinfo'].get('td_url', '')
                 result["image"] = stock_data['pidinfo'].get('image_url', '')
 
-                # Try to upload the image to Discord CDN if it's not already cached
-                if result["image"] and not self.products.get(pid, {}).get("cdn_image"):
-                    cdn_image = self.upload_image_to_discord(pid, result["image"])
-                    if cdn_image:
-                        result["cdn_image"] = cdn_image
-                elif pid in self.products and self.products[pid].get("cdn_image"):
-                    # Use existing cached CDN image
-                    result["cdn_image"] = self.products[pid].get("cdn_image")
+                # Try to save the image locally if it's not already cached
+                if result["image"] and not self.products.get(pid, {}).get("local_image"):
+                    local_image = self.save_image_locally(pid, result["image"])
+                    if local_image:
+                        result["local_image"] = local_image
+                elif pid in self.products and self.products[pid].get("local_image"):
+                    # Use existing cached local image
+                    result["local_image"] = self.products[pid].get("local_image")
 
                 logger.info(f"Found product: {result['title']}")
 
@@ -1042,10 +1062,21 @@ class Booksamillion:
             curr_stock_qty = store.get("stock_qty")
 
             # Detect changes in availability or stock quantity
-            if curr_availability != prev_availability or curr_stock_qty != prev_stock_qty:
+            # Only process if there's a meaningful change
+            is_new_product = not previous_product  # No previous data means new product
+            has_stock_change = curr_availability != prev_availability or curr_stock_qty != prev_stock_qty
+
+            if has_stock_change:
                 # Determine the event type
-                event_type = "new_item"
-                if prev_availability:
+                if is_new_product:
+                    # For new products, only notify if they're in stock
+                    if curr_availability in ['IN STOCK', 'LIMITED STOCK']:
+                        event_type = "new_item"
+                    else:
+                        # Skip out-of-stock new products
+                        continue
+                else:
+                    # For existing products, detect the type of change
                     if curr_availability in ['IN STOCK', 'LIMITED STOCK'] and prev_availability not in ['IN STOCK',
                                                                                                         'LIMITED STOCK']:
                         event_type = "restocked"
@@ -1053,7 +1084,9 @@ class Booksamillion:
                                                                                                           'LIMITED STOCK']:
                         event_type = "oos"
                     elif curr_stock_qty is not None and prev_stock_qty is not None and curr_stock_qty != prev_stock_qty:
-                        event_type = "restocked"  # Use restocked event type for quantity changes
+                        event_type = "restocked"
+                    else:
+                        continue  # No meaningful change
 
                 # Create status change string with emojis
                 prev_emoji = self._emoji_for_status(prev_availability)
@@ -1069,14 +1102,14 @@ class Booksamillion:
 
                 stores_with_changes.append(store)
 
-        # Check if we need to upload the image to Discord
-        if result.get("image") and not previous_product.get("cdn_image"):
-            cdn_image = self.upload_image_to_discord(pid, result["image"])
-            if cdn_image:
-                result["cdn_image"] = cdn_image
-        elif previous_product.get("cdn_image"):
-            # Keep existing CDN image if available
-            result["cdn_image"] = previous_product.get("cdn_image")
+        # Check if we need to save the image locally
+        if result.get("image") and not previous_product.get("local_image"):
+            local_image = self.save_image_locally(pid, result["image"])
+            if local_image:
+                result["local_image"] = local_image
+        elif previous_product.get("local_image"):
+            # Keep existing local image if available
+            result["local_image"] = previous_product.get("local_image")
 
         # Update product data
         self.products[pid] = {
@@ -1085,7 +1118,7 @@ class Booksamillion:
             "price": result["price"] or previous_product.get("price", ""),
             "url": result["url"] or previous_product.get("url", ""),
             "image": result["image"] or previous_product.get("image", ""),
-            "cdn_image": result.get("cdn_image") or previous_product.get("cdn_image", ""),
+            "local_image": result.get("local_image") or previous_product.get("local_image", ""),
             "in_stock": result["in_stock"],
             "first_seen": previous_product.get("first_seen", current_time),
             "last_check": current_time,
@@ -1107,20 +1140,20 @@ class Booksamillion:
                 # Append new store changes to existing changes
                 self.stock_changes[pid]["stores"].extend(stores_with_changes)
 
-                # Send immediate notification for in-stock items
-                if result["in_stock"]:
-                    # For newly discovered products that are in stock, treat all stores as "changes"
-                    notification_stores = stores_with_changes if stores_with_changes else result.get("stores", [])
+                # Send immediate notification for meaningful stock changes only
+                if stores_with_changes:
+                    # Only send notifications if there are actual store changes
+                    in_stock_stores = [s for s in stores_with_changes if
+                                       s.get("availability", "").upper() in ['IN STOCK', 'LIMITED STOCK']]
 
-                    if notification_stores:
-                        print(
-                            f"[DEBUG] Triggering Discord alert for {result['title']} - {len(notification_stores)} stores")
+                    if in_stock_stores:
+                        print(f"[DEBUG] Triggering Discord alert for {result['title']} - {len(in_stock_stores)} stores")
                         try:
                             success = notifier.send_alert(
                                 title=f"{result['title']} is in stock!",
-                                description=f"{len(notification_stores)} stores have it available.",
+                                description=f"{len(in_stock_stores)} stores have it available.",
                                 url=result.get("url", ""),
-                                image=result.get("cdn_image", result.get("image", "")),
+                                image=result.get("local_image", result.get("image", "")),
                                 store="Books-A-Million"
                             )
                             print(f"[DEBUG] Notification sent: {success}")
@@ -1183,11 +1216,11 @@ class Booksamillion:
 
                     logger.info(f"Found NEW product: {product.get('title')} (PID: {pid})")
 
-                    # Try to upload the image to Discord CDN if available
+                    # Try to save the image locally if available
                     if product.get("image"):
-                        cdn_image = self.upload_image_to_discord(pid, product["image"])
-                        if cdn_image:
-                            product["cdn_image"] = cdn_image
+                        local_image = self.save_image_locally(pid, product["image"])
+                        if local_image:
+                            product["local_image"] = local_image
 
                     # Add to the products dictionary
                     current_time = datetime.datetime.now().isoformat()
@@ -1336,8 +1369,13 @@ class Booksamillion:
         title = product.get("title", "")
         url = product.get("url", "")
 
-        # Prioritize using Discord CDN image if available, fall back to original image
-        image = product.get("cdn_image", product.get("image", ""))
+        # Use local image if available, fall back to original image URL
+        local_image = product.get("local_image", "")
+        if local_image and os.path.exists(local_image):
+            # Convert local path to file:// URL for Discord
+            image = f"file://{os.path.abspath(local_image)}"
+        else:
+            image = product.get("image", "")
 
         # Extract store details
         store_name = store.get("name", "") or store.get("city", "")
@@ -1421,15 +1459,22 @@ class Booksamillion:
                 "value": timestamp
             })
         elif event_type == "oos":
-            stock_change = f"{prev_stock_qty if prev_stock_qty is not None else 1} → 0"
+        # Only show stock change if there was actually previous stock
+        if prev_stock_qty is not None and prev_stock_qty > 0:
+            stock_change = f"{prev_stock_qty} → 0"
             fields.append({
                 "name": "**Stock**:",
                 "value": stock_change
             })
+        else:
             fields.append({
-                "name": "🔴 **Item Removed**",
-                "value": timestamp
+                "name": "**Stock**:",
+                "value": "0"
             })
+        fields.append({
+            "name": "🔴 **Item Removed**",
+            "value": timestamp
+        })
 
         # Store address field is common to all event types
         fields.append({
@@ -1531,22 +1576,9 @@ class Booksamillion:
                 embed = self.build_embed(product, store, event_type)
                 embeds.append(embed)
         else:
-            # Handle out of stock products with no stores
-            event_type = "oos"
-            store = {
-                "name": "Unknown",
-                "phone": "",
-                "address": "",
-                "city": "",
-                "state": "",
-                "zip": "",
-                "previous_stock_qty": 1,
-                "stock_qty": 0,
-                "status_change": "🟢 → 🔴",
-                "last_restocks": datetime.datetime.now().strftime("%B %d, %Y at %I:%M %p")
-            }
-            embed = self.build_embed(product, store, event_type)
-            embeds.append(embed)
+        # Don't create notifications for products with no store information
+        logger.debug(f"No stores found for product {product.get('pid')}, skipping notification")
+        pass
 
         return {
             "username": "1Tap Monitors",
@@ -1804,7 +1836,9 @@ if __name__ == "__main__":
     # Ensure logs directory exists
     os.makedirs(logs_dir, exist_ok=True)
 
-    log_file = os.path.join(logs_dir, "booksamillion.log")
+    # Create timestamped log filename
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(logs_dir, f"booksamillion_{timestamp}.log")
 
     # Configure logging with reduced verbosity
     logging.basicConfig(
