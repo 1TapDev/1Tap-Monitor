@@ -92,7 +92,22 @@ class DiscordNotifier:
                 headers={"Content-Type": "application/json"}
             )
 
-            if response.status_code == 204:
+            # DEBUG: print the payload being sent
+            print("[DEBUG] Webhook Payload:")
+            print(json.dumps(payload, indent=2))
+
+            # Send the webhook
+            response = requests.post(
+                self.webhook_url,
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            )
+
+            # Print full response info
+            print(f"[DEBUG] Status Code: {response.status_code}")
+            print(f"[DEBUG] Response Body: {response.text}")
+
+            if response.status_code in [200, 204]:
                 logger.info(f"Successfully sent alert: {title}")
                 return True
             else:

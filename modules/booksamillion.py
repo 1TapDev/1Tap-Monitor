@@ -10,6 +10,7 @@ import json
 import re
 import time
 import logging
+import requests
 import random
 import base64  # Added for base64 decoding
 import datetime
@@ -17,13 +18,15 @@ from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 from urllib.parse import urlparse  # Added for extracting file extensions
 from dotenv import load_dotenv
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from notifier import DiscordNotifier
 
 load_dotenv()
+notifier = DiscordNotifier(webhook_url=os.getenv("DISCORD_WEBHOOK"))
 
 # Add project root to path to fix import issues
 sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
-
-import requests
 
 # Create utils/__init__.py if it doesn't exist
 utils_init = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'utils', '__init__.py')
@@ -93,6 +96,11 @@ except ImportError:
 # Configure module logger
 logger = logging.getLogger("Booksamillion")
 
+# Reduce verbosity of other loggers
+logging.getLogger("CloudflareBypass").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+
 
 class Booksamillion:
     """
@@ -121,11 +129,15 @@ class Booksamillion:
             cookie_max_age=3600  # Keep cookies valid for 1 hour
         )
 
-        # Configure logging behavior
+        # Configure logging behavior - reduce verbosity
         self.cf_bypass.set_logging(
-            enable_logging=self.config.get("debug", {}).get("log_requests", True),
+            enable_logging=self.config.get("debug", {}).get("log_requests", False),  # Changed to False
             save_readable=self.config.get("debug", {}).get("save_html", False)
         )
+
+        # Set CloudflareBypass logger to WARNING level to reduce noise
+        cf_logger = logging.getLogger("CloudflareBypass")
+        cf_logger.setLevel(logging.WARNING)
         self.cf_bypass.aggressive_mode = True
 
         # Create session
@@ -195,7 +207,7 @@ class Booksamillion:
                     ]
                 },
                 "debug": {
-                    "log_requests": True,
+                    "log_requests": False,
                     "save_html": False
                 }
             }
@@ -317,13 +329,6 @@ class Booksamillion:
     def _should_send_notification(self, pid, notification_type="stock_change"):
         """
         Determine if a notification should be sent for a product
-
-        Args:
-            pid: Product ID
-            notification_type: Type of notification ("new_item", "stock_change")
-
-        Returns:
-            bool: True if notification should be sent, False otherwise
         """
         current_date = datetime.datetime.now().strftime('%Y-%m-%d')
 
@@ -384,9 +389,15 @@ class Booksamillion:
                     # Decode base64 content
                     image_content = base64.b64decode(encoded)
 
-                    # If it's a tiny 1x1 pixel placeholder, use default placeholder instead
-                    if len(image_content) < 100:
-                        logger.debug(f"Image for {pid} is small ({len(image_content)} bytes) but using it anyway")
+                    # Check for tiny placeholder images or invalid content
+                    if len(image_content) < 1000:  # Increased threshold
+                        logger.warning(f"Image for {pid} is too small ({len(image_content)} bytes), using placeholder")
+                        return self._get_pokemon_card_placeholder(pid)
+
+                    # Check if image is valid by attempting to validate it
+                    if not self._is_valid_image(image_content):
+                        logger.warning(f"Image for {pid} failed validation, using placeholder")
+                        return self._get_pokemon_card_placeholder(pid)
 
                     filename = f"{pid}{extension}"
                 except Exception as e:
@@ -429,15 +440,26 @@ class Booksamillion:
                     # Prepare the image for upload
                     image_content = image_response.content
 
-                    # Check for tiny placeholder images
-                    if len(image_content) < 100:
-                        logger.debug(f"Image for {pid} is small ({len(image_content)} bytes) but using it anyway")
+                    # Check for tiny placeholder images or invalid content
+                    if len(image_content) < 1000:  # Increased threshold
+                        logger.warning(f"Image for {pid} is too small ({len(image_content)} bytes), using placeholder")
+                        return self._get_pokemon_card_placeholder(pid)
+
+                    # Check if image is valid by attempting to validate it
+                    if not self._is_valid_image(image_content):
+                        logger.warning(f"Image for {pid} failed validation, using placeholder")
+                        return self._get_pokemon_card_placeholder(pid)
 
                     file_extension = self._get_file_extension(image_url)
                     filename = f"{pid}{file_extension}"
                 except Exception as e:
                     logger.error(f"Error downloading image for {pid}: {str(e)}")
                     return self._get_pokemon_card_placeholder(pid)
+
+            # Final validation before upload
+            if not self._is_valid_image(image_content):
+                logger.warning(f"Final validation failed for {pid}, using placeholder")
+                return self._get_pokemon_card_placeholder(pid)
 
             # Upload to Discord
             logger.info(f"Uploading image for {pid} to Discord CDN")
@@ -630,24 +652,51 @@ class Booksamillion:
             return False
 
         try:
-            # Try to detect image format
             import io
             from PIL import Image
 
-            img = Image.open(io.BytesIO(image_data))
-            # Validate image by loading it
-            img.verify()
-            return True
-        except:
-            try:
-                # Second attempt with just size check
-                from PIL import Image
-                img = Image.open(io.BytesIO(image_data))
-                width, height = img.size
-                # Make sure it's not a 1x1 pixel image
-                return width > 10 and height > 10
-            except:
+            # Create a copy of the data for verification
+            img_copy = io.BytesIO(image_data)
+            img = Image.open(img_copy)
+
+            # Get image properties
+            width, height = img.size
+            mode = img.mode
+
+            # Check if it's a reasonable size (not 1x1 pixel placeholder)
+            if width < 50 or height < 50:
+                logger.debug(f"Image too small: {width}x{height}")
                 return False
+
+            # Check if it's not a solid color (common for placeholder images)
+            img_copy.seek(0)  # Reset stream position
+            img_sample = Image.open(img_copy)
+            img_sample = img_sample.convert('RGB')
+
+            # Sample a few pixels to check for variation
+            colors = []
+            step = max(1, min(width, height) // 10)
+            for x in range(0, min(width, 100), step):
+                for y in range(0, min(height, 100), step):
+                    try:
+                        colors.append(img_sample.getpixel((x, y)))
+                        if len(colors) >= 10:  # Sample enough pixels
+                            break
+                    except:
+                        continue
+                if len(colors) >= 10:
+                    break
+
+            # Check if all sampled pixels are the same (solid color = likely placeholder)
+            if len(set(colors)) < 2:
+                logger.debug("Image appears to be solid color (placeholder)")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.debug(f"Image validation failed: {str(e)}")
+            return False
 
     def get_store_stock_qty(self, pid):
         """
@@ -1057,6 +1106,26 @@ class Booksamillion:
             else:
                 # Append new store changes to existing changes
                 self.stock_changes[pid]["stores"].extend(stores_with_changes)
+
+                # Send immediate notification for in-stock items
+                if result["in_stock"]:
+                    # For newly discovered products that are in stock, treat all stores as "changes"
+                    notification_stores = stores_with_changes if stores_with_changes else result.get("stores", [])
+
+                    if notification_stores:
+                        print(
+                            f"[DEBUG] Triggering Discord alert for {result['title']} - {len(notification_stores)} stores")
+                        try:
+                            success = notifier.send_alert(
+                                title=f"{result['title']} is in stock!",
+                                description=f"{len(notification_stores)} stores have it available.",
+                                url=result.get("url", ""),
+                                image=result.get("cdn_image", result.get("image", "")),
+                                store="Books-A-Million"
+                            )
+                            print(f"[DEBUG] Notification sent: {success}")
+                        except Exception as e:
+                            print(f"[DEBUG] Notification failed: {e}")
 
         return stores_with_changes
 
@@ -1474,7 +1543,7 @@ class Booksamillion:
                 "previous_stock_qty": 1,
                 "stock_qty": 0,
                 "status_change": "🟢 → 🔴",
-                "last_restocks": datetime.now().strftime("%B %d, %Y at %I:%M %p")
+                "last_restocks": datetime.datetime.now().strftime("%B %d, %Y at %I:%M %p")
             }
             embed = self.build_embed(product, store, event_type)
             embeds.append(embed)
@@ -1525,13 +1594,26 @@ class Booksamillion:
                 webhook_url,
                 json=message,
                 headers={"Content-Type": "application/json"},
-                timeout=10  # Add timeout
+                timeout=10
             )
+
+            # Handle rate limiting
+            if response.status_code == 429:
+                retry_after = response.json().get('retry_after', 1)
+                logger.warning(f"Rate limited, waiting {retry_after} seconds")
+                time.sleep(retry_after + 0.1)  # Add small buffer
+                # Retry once
+                response = requests.post(
+                    webhook_url,
+                    json=message,
+                    headers={"Content-Type": "application/json"},
+                    timeout=10
+                )
 
             if response.status_code == 204:
                 logger.info(f"Discord notification sent for {product.get('pid')}")
                 # Mark this product as notified
-                product_store_key = f"{pid}:{datetime.now().strftime('%Y-%m-%d')}"
+                product_store_key = f"{pid}:{datetime.datetime.now().strftime('%Y-%m-%d')}"
                 self.notified_products.add(product_store_key)
                 self._save_notified_products()
                 return True
@@ -1551,7 +1633,7 @@ class Booksamillion:
                     if retry_response.status_code == 204:
                         logger.info(f"Discord notification sent with limited embeds for {product.get('pid')}")
                         # Mark this product as notified
-                        product_store_key = f"{pid}:{datetime.now().strftime('%Y-%m-%d')}"
+                        product_store_key = f"{pid}:{datetime.datetime.now().strftime('%Y-%m-%d')}"
                         self.notified_products.add(product_store_key)
                         self._save_notified_products()
                         return True
@@ -1658,6 +1740,27 @@ class Booksamillion:
         except Exception as e:
             logger.error(f"Error in main monitor loop: {str(e)}")
 
+    def send_new_product_notifications(self, new_products):
+        """
+        Send notifications for newly found products
+
+        Args:
+            new_products: List of new product dictionaries
+        """
+        for i, product in enumerate(new_products):
+            product_id = product.get('pid')
+            if product_id and self._should_send_notification(product_id, "new_item"):
+                logger.info(f"Sending notification for new product: {product_id}")
+                success = self.send_discord_notification(product, is_new=True)
+                if success:
+                    logger.info(f"Successfully sent notification for new product: {product_id}")
+                else:
+                    logger.error(f"Failed to send notification for new product: {product_id}")
+
+                # Add delay between notifications (except for the last one)
+                if i < len(new_products) - 1:
+                    time.sleep(0.5)  # Wait 500ms between notifications
+
     def start(self):
         """
         Start the Booksamillion monitoring loop for CLI dispatcher.
@@ -1672,23 +1775,59 @@ class Booksamillion:
         self.running = False
 
 
+class NoiseFilter(logging.Filter):
+    """Filter out noisy log messages"""
+
+    def filter(self, record):
+        # Filter out specific CloudflareBypass messages
+        noisy_messages = [
+            "Cookies need refresh",
+            "Making request to",
+            "Response has HTML content type",
+            "Found JSON object in HTML response",
+            "Cookies expired or invalid",
+            "Generating fresh Cloudflare cookies",
+            "Accessing https://www.booksamillion.com/",
+            "No cf_clearance in first try",
+            "No cf_clearance cookie found",
+            "Saved cookies to file"
+        ]
+
+        return not any(msg in record.getMessage() for msg in noisy_messages)
+
 # For standalone testing
 if __name__ == "__main__":
-    # Force logging configuration for "Booksamillion" logger
+    # Get project root for log file
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    logs_dir = os.path.join(project_root, "logs")
+
+    # Ensure logs directory exists
+    os.makedirs(logs_dir, exist_ok=True)
+
+    log_file = os.path.join(logs_dir, "booksamillion.log")
+
+    # Configure logging with reduced verbosity
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
+
+    # Set specific logger levels to reduce noise
+    logging.getLogger("CloudflareBypass").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
+    # Apply noise filter to CloudflareBypass logger
+    cf_logger = logging.getLogger("CloudflareBypass")
+    cf_logger.addFilter(NoiseFilter())
+
+    # Keep Booksamillion logger at INFO level
     logger.setLevel(logging.INFO)
-
-    # Avoid duplicate handlers if rerunning
-    if not logger.handlers:
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-        file_handler = logging.FileHandler("booksamillion.log")
-        file_handler.setFormatter(formatter)
-
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-
-        logger.addHandler(file_handler)
-        logger.addHandler(stream_handler)
 
     # Create module instance
     monitor = Booksamillion()
@@ -1699,11 +1838,17 @@ if __name__ == "__main__":
     try:
         # Run the initial monitoring cycle immediately
         print("\n=== Starting initial monitoring cycle ===")
-        # Scan for new products
+
+        # Scan for new products first
         new_products = monitor.scan_new_items()
         print(f"Found {len(new_products)} new products")
 
-        # Check stock for products
+        # Send notifications for new products immediately
+        if new_products:
+            print(f"Sending notifications for {len(new_products)} new products...")
+            monitor.send_new_product_notifications(new_products)
+
+        # Check stock for existing products
         results = monitor.check_stock()
         monitor._save_products()
         print(f"Checked stock for {len(results)} products")
@@ -1724,7 +1869,7 @@ if __name__ == "__main__":
             interval = monitor.config.get("interval", monitor.INTERVAL)
 
             # Calculate next run time
-            next_run = datetime.now() + datetime.timedelta(seconds=interval)
+            next_run = datetime.datetime.now() + datetime.timedelta(seconds=interval)
             print(f"\n=== Next monitoring cycle will start at {next_run.strftime('%Y-%m-%d %H:%M:%S')} ===")
             print(f"Sleeping for {interval} seconds...")
 
