@@ -17,8 +17,8 @@
     "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=2",
     "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=3",
     "https://www.booksamillion.com/search2?query=The%20Pokemon%20Company%20International&filters%5Bbrand%5D=The%20Pokemon%20Company%20International&sort_by=release_date&page=4",
-    "https://www.booksamillion.com/search2?query=pokemon%20cards&filters%5Bcategory%5D=Toys&sort_by=release_date",
-    "https://www.booksamillion.com/search2?query=Pok%C3%83%C2%A9mon+TCG+Scarlet+%26+Violet&sort_by=release_date"
+    "https://www.booksamillion.com/search2?query=Pok%C3%A9mon+TCG+Scarlet+%26+Violet",
+    "https://www.booksamillion.com/search2?query=Pok%C3%83%C2%A9mon%20TCG%20Scarlet%20%26%20Violet;page=2"
   ],
 
   "pids": [

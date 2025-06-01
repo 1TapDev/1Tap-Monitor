@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from notifier import DiscordNotifier
+from image_validator import ImageValidator
 
 load_dotenv()
 notifier = DiscordNotifier(webhook_url=os.getenv("DISCORD_WEBHOOK"))
@@ -118,7 +119,15 @@ class Booksamillion:
         self.config = self._load_config()
 
         # Get project root directory (go up from modules/booksamillion to project root)
-        self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if os.path.basename(current_dir) == "modules":
+            self.project_root = os.path.dirname(current_dir)  # Go up one level from modules
+        else:
+            self.project_root = os.path.join(current_dir, "..")  # Fallback
+        self.project_root = os.path.abspath(self.project_root)
+
+        # Debug: Print the project root to verify it's correct
+        logger.info(f"Project root detected as: {self.project_root}")
 
         # Ensure data directory exists in project root
         self.data_dir = os.path.join(self.project_root, "data")
@@ -139,10 +148,40 @@ class Booksamillion:
             cookie_max_age=3600  # Keep cookies valid for 1 hour
         )
 
-        # Configure logging behavior - reduce verbosity
+        # Configure CloudflareBypass to use correct project root for logs
+        try:
+            # Set the logs directory to project root logs folder
+            if hasattr(self.cf_bypass, 'logs_dir'):
+                self.cf_bypass.logs_dir = os.path.join(self.project_root, "logs")
+            elif hasattr(self.cf_bypass, 'log_dir'):
+                self.cf_bypass.log_dir = os.path.join(self.project_root, "logs")
+            elif hasattr(self.cf_bypass, 'session') and hasattr(self.cf_bypass.session, 'logs_dir'):
+                self.cf_bypass.session.logs_dir = os.path.join(self.project_root, "logs")
+
+            # Try to disable logging at the CloudflareBypass level
+            if hasattr(self.cf_bypass, 'enable_logging'):
+                self.cf_bypass.enable_logging = False
+            if hasattr(self.cf_bypass, 'save_readable'):
+                self.cf_bypass.save_readable = False
+
+            logger.info(f"Configured CloudflareBypass logs directory: {os.path.join(self.project_root, 'logs')}")
+        except Exception as e:
+            logger.warning(f"Could not configure CloudflareBypass logs directory: {e}")
+
+        # Clean up any existing logs in the wrong location
+        wrong_logs_dir = os.path.join(os.path.dirname(__file__), "logs")
+        if os.path.exists(wrong_logs_dir):
+            try:
+                import shutil
+                shutil.rmtree(wrong_logs_dir)
+                logger.info(f"Cleaned up old logs directory: {wrong_logs_dir}")
+            except Exception as e:
+                logger.warning(f"Could not clean up old logs directory: {e}")
+
+        # Configure logging behavior - disable all request logging
         self.cf_bypass.set_logging(
-            enable_logging=self.config.get("debug", {}).get("log_requests", False),  # Changed to False
-            save_readable=self.config.get("debug", {}).get("save_html", False)
+            enable_logging=False,  # Completely disable
+            save_readable=False  # Completely disable
         )
 
         # Set CloudflareBypass logger to WARNING level to reduce noise
@@ -172,6 +211,21 @@ class Booksamillion:
         logger.info(f"Loaded {len(self.products)} products from cache")
         logger.info(
             f"Configured for zip code {self.config.get('target_zipcode')} with radius {self.config.get('search_radius')}mi")
+
+        self.image_validator = ImageValidator(
+            image_dir=os.path.join(self.project_root, "images"),
+            min_file_size=500
+        )
+
+        # Debug ImageValidator setup
+        logger.info(f"🔍 ImageValidator image_dir: {self.image_validator.image_dir}")
+        logger.info(f"🔍 ImageValidator min_file_size: {getattr(self.image_validator, 'min_file_size', 'Unknown')}")
+        if hasattr(self.image_validator, 'image_dir'):
+            if os.path.exists(self.image_validator.image_dir):
+                files = os.listdir(self.image_validator.image_dir)
+                logger.info(f"🔍 Files in image directory: {files}")
+            else:
+                logger.warning(f"🔍 Image directory doesn't exist: {self.image_validator.image_dir}")
 
     def _load_config(self):
         """Load module configuration"""
@@ -239,6 +293,9 @@ class Booksamillion:
         """Load product cache"""
         product_db_file = self.config.get("product_db_file", "data/booksamillion_products.json")
 
+        if not os.path.isabs(product_db_file):
+            product_db_file = os.path.join(self.project_root, product_db_file)
+
         if os.path.exists(product_db_file):
             try:
                 with open(product_db_file, 'r') as f:
@@ -252,10 +309,20 @@ class Booksamillion:
         """Save products to cache file"""
         product_db_file = self.config.get("product_db_file", "data/booksamillion_products.json")
 
+        # Make path absolute if it's relative
+        if not os.path.isabs(product_db_file):
+            product_db_file = os.path.join(self.project_root, product_db_file)
+
+        logger.debug(f"Attempting to save products to: {product_db_file}")
+        logger.debug(f"Number of products to save: {len(self.products)}")
+
         try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(product_db_file), exist_ok=True)
+
             with open(product_db_file, 'w') as f:
                 json.dump(self.products, f, indent=2)
-            logger.debug(f"Saved {len(self.products)} products to cache")
+            logger.info(f"Successfully saved {len(self.products)} products to {product_db_file}")
         except Exception as e:
             logger.error(f"Error saving products to file: {str(e)}")
 
@@ -392,118 +459,100 @@ class Booksamillion:
 
         return placeholder_path
 
-    def save_image_locally(self, pid, image_url):
-        """
-        Download and save product image locally, return the local file path.
+    def save_image_locally(self, pid, image_url, result):  # Make sure this matches
+        """Download and validate product image locally with fallback"""
+        try:
+            logger.info(f"🖼️ Attempting to save image for {pid} from {image_url}")
 
-        Args:
-            pid: Product ID
-            image_url: Original image URL
+            # Skip known placeholder URLs
+            if (image_url.startswith(
+                    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=') or
+                    'placeholder' in image_url.lower() or
+                    'default' in image_url.lower()):
+                logger.info(f"🔄 Skipping known placeholder URL for {pid}")
+                placeholder_path = self._get_placeholder_image_path()
+                logger.info(f"🔄 Using placeholder: {placeholder_path}")
+                return placeholder_path
 
-        Returns:
-            Local file path if successful, placeholder path otherwise
-        """
-        if not pid or not image_url:
-            logger.warning(f"Missing pid or image_url, skipping image save for PID: {pid}")
+            # Try ImageValidator first
+            local_image_path = None
+            if self.image_validator:
+                local_image_path = self.image_validator.download_and_validate_image(pid, image_url)
+                logger.info(f"🖼️ ImageValidator returned path: {local_image_path}")
+
+            # If ImageValidator failed, try our own download
+            if not local_image_path:
+                logger.info(f"🔄 ImageValidator failed, trying direct download for {pid}")
+                local_image_path = self._download_image_directly(pid, image_url)
+
+            if local_image_path and os.path.exists(local_image_path):
+                logger.info(f"✅ Image successfully saved: {local_image_path}")
+                result["local_image"] = local_image_path  # Make sure 'result' is the parameter name
+                return local_image_path
+            else:
+                logger.warning(f"❌ All image download methods failed for {pid}")
+
+            placeholder_path = self._get_placeholder_image_path()
+            logger.info(f"🔄 Using placeholder: {placeholder_path}")
+            return placeholder_path
+
+        except Exception as e:
+            logger.error(f"Error in save_image_locally for {pid}: {str(e)}")
             return self._get_placeholder_image_path()
 
+    def _download_image_directly(self, pid, image_url):
+        """Direct image download using CloudflareBypass"""
         try:
-            # Create images directory in project root
+            if not image_url or image_url.startswith('data:image'):
+                return None
+
+            logger.info(f"📥 Direct downloading image for {pid} using browser headers")
+
+            # Create filename
             images_dir = os.path.join(self.project_root, "images")
             os.makedirs(images_dir, exist_ok=True)
 
-            # Check if this is a data URL (base64 embedded image)
-            if "data:image" in image_url:
-                # Handle malformed URLs where base URL is prepended to data URL
-                if image_url.startswith("https://www.booksamillion.comdata:image"):
-                    image_url = image_url.replace("https://www.booksamillion.comdata:image", "data:image")
+            # Get file extension from URL
+            ext = self._get_file_extension(image_url)
+            filename = f"{pid}{ext}"
+            filepath = os.path.join(images_dir, filename)
 
-                # Extract base64 data
-                try:
-                    # Parse the data URL
-                    header, encoded = image_url.split(",", 1)
-                    content_type = header.split(":")[1].split(";")[0]
+            # Use exact browser headers
+            headers = {
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Referer": "https://www.booksamillion.com/",
+                "Sec-Ch-Ua": '"Google Chrome";v="136", "Chromium";v="136", "Not-A.Brand";v="99"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "image",
+                "Sec-Fetch-Mode": "no-cors",
+                "Sec-Fetch-Site": "cross-site",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+            }
 
-                    # Create image file extension based on content type
-                    extension = f".{content_type.split('/')[1]}"
-                    if extension == ".jpeg":
-                        extension = ".jpg"
+            # Try CloudflareBypass download
+            response = self.cf_bypass.get(
+                image_url,
+                headers=headers,
+                timeout=20,
+                enable_logging=False
+            )
 
-                    # Decode base64 content
-                    image_content = base64.b64decode(encoded)
-
-                    filename = f"{pid}{extension}"
-                except Exception as e:
-                    logger.error(f"Failed to decode data URL for {pid}: {str(e)}")
-                    return self._get_placeholder_image_path()
-            else:
-                # Download the image
-                logger.info(f"Downloading image for {pid} from {image_url}")
-
-                # Create browser-like headers
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Referer": "https://www.booksamillion.com/p/" + pid,
-                    "Sec-Fetch-Dest": "image",
-                    "Sec-Fetch-Mode": "no-cors",
-                    "Sec-Fetch-Site": "same-site",
-                }
-
-                try:
-                    # Always use the CloudflareBypass for image downloads
-                    if not hasattr(self, 'cf_bypass') or not self.cf_bypass:
-                        logger.error(f"CloudflareBypass not initialized, falling back to placeholder for {pid}")
-                        return self._get_placeholder_image_path()
-
-                    # Try to download using CloudflareBypass
-                    image_response = self.cf_bypass.get(
-                        image_url,
-                        headers=headers,
-                        timeout=self.config.get("timeout", 30),
-                        enable_logging=False
-                    )
-
-                    if image_response.status_code != 200:
-                        logger.error(f"Failed to download image for {pid}: HTTP {image_response.status_code}")
-                        return self._get_placeholder_image_path()
-
-                    # Prepare the image for saving
-                    image_content = image_response.content
-
-                    file_extension = self._get_file_extension(image_url)
-                    filename = f"{pid}{file_extension}"
-                except Exception as e:
-                    logger.error(f"Error downloading image for {pid}: {str(e)}")
-                    return self._get_placeholder_image_path()
-
-            # Validate image content before saving
-            if len(image_content) < 1000:  # Too small
-                logger.warning(f"Image for {pid} is too small ({len(image_content)} bytes), using placeholder")
-                return self._get_placeholder_image_path()
-
-            if not self._is_valid_image(image_content):
-                logger.warning(f"Image for {pid} failed validation, using placeholder")
-                return self._get_placeholder_image_path()
-
-            # Save the image locally
-            local_path = os.path.join(images_dir, filename)
-
-            # Check if image already exists
-            if os.path.exists(local_path):
-                logger.debug(f"Image for {pid} already exists locally: {local_path}")
-                return local_path
-
-            with open(local_path, 'wb') as f:
-                f.write(image_content)
-
-            logger.info(f"Successfully saved image for {pid} locally: {local_path}")
-            return local_path
+            if response.status_code == 200 and len(response.content) > 500:
+                if self._is_valid_image(response.content):
+                    with open(filepath, 'wb') as f:
+                        f.write(response.content)
+                    logger.info(f"✅ CloudflareBypass download successful: {filepath}")
+                    return filepath
 
         except Exception as e:
-            logger.error(f"Error saving image locally for {pid}: {str(e)}")
-            return self._get_placeholder_image_path()
+            logger.error(f"❌ Image download failed for {pid}: {str(e)}")
+
+        return None
 
     def _get_placeholder_image(self):
         """Return a generic placeholder image URL from Discord CDN or a default one"""
@@ -598,17 +647,19 @@ class Booksamillion:
 
                 # Create browser-like headers
                 headers = {
-                    "User-Agent": user_agent,
                     "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    "Accept-Encoding": "gzip, deflate, br",
                     "Accept-Language": "en-US,en;q=0.9",
-                    "Referer": f"https://www.booksamillion.com/p/{pid}",
-                    "Origin": "https://www.booksamillion.com",
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                    "Referer": "https://www.booksamillion.com/",
+                    "Sec-Ch-Ua": '"Google Chrome";v="136", "Chromium";v="136", "Not-A.Brand";v="99"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
                     "Sec-Fetch-Dest": "image",
                     "Sec-Fetch-Mode": "no-cors",
-                    "Sec-Fetch-Site": "same-site",
-                    "Connection": "keep-alive",
-                    "Cache-Control": "no-cache",
-                    "Pragma": "no-cache"
+                    "Sec-Fetch-Site": "cross-site",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
                 }
 
                 logger.debug(f"Attempt {attempt + 1}/{max_retries} for {pid} image download")
@@ -668,8 +719,9 @@ class Booksamillion:
         return None, False
 
     def _is_valid_image(self, image_data):
-        """Check if the data is a valid image file"""
-        if not image_data or len(image_data) < 1000:
+        """Check if the data is a valid image file with enhanced debugging"""
+        if not image_data or len(image_data) < 500:  # Reduced from 1000 to 500
+            logger.debug(f"Image too small: {len(image_data)} bytes")
             return False
 
         try:
@@ -685,35 +737,68 @@ class Booksamillion:
             mode = img.mode
 
             # Check if it's a reasonable size (not 1x1 pixel placeholder)
-            if width < 50 or height < 50:
+            if width < 50 or height < 50:  # Reject very small images including 1x1 placeholders
                 logger.debug(f"Image too small: {width}x{height}")
                 return False
 
-            # Check if it's not a solid color (common for placeholder images)
-            img_copy.seek(0)  # Reset stream position
+            # Check for common placeholder patterns
+            if width == 1 and height == 1:
+                logger.debug("1x1 pixel placeholder detected")
+                return False
+
+            # Check for data URL placeholders
+            if image_data.startswith(
+                    b'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='):
+                logger.debug("Known 1x1 transparent placeholder detected")
+                return False
+
+            # Check file signature to ensure it's actually an image
+            image_signatures = [
+                b'\xFF\xD8\xFF',  # JPEG
+                b'\x89PNG\r\n\x1a\n',  # PNG
+                b'GIF8',  # GIF
+                b'RIFF',  # WebP (starts with RIFF)
+                b'BM',  # BMP
+            ]
+
+            file_start = image_data[:10]
+            is_valid_signature = any(file_start.startswith(sig) for sig in image_signatures)
+
+            if not is_valid_signature:
+                logger.debug(f"Invalid image signature: {file_start}")
+                return False
+
+            # Less strict color checking - just verify it's not completely empty
+            img_copy.seek(0)
             img_sample = Image.open(img_copy)
             img_sample = img_sample.convert('RGB')
 
-            # Sample a few pixels to check for variation
+            # Sample a few pixels to check for basic content
             colors = []
-            step = max(1, min(width, height) // 10)
-            for x in range(0, min(width, 100), step):
-                for y in range(0, min(height, 100), step):
+            step = max(1, min(width, height) // 5)  # Reduced sampling
+            for x in range(0, min(width, 50), step):
+                for y in range(0, min(height, 50), step):
                     try:
                         colors.append(img_sample.getpixel((x, y)))
-                        if len(colors) >= 10:  # Sample enough pixels
+                        if len(colors) >= 5:  # Reduced from 10 to 5
                             break
                     except:
                         continue
-                if len(colors) >= 10:
+                if len(colors) >= 5:
                     break
 
-            # Check if all sampled pixels are the same (solid color = likely placeholder)
-            if len(set(colors)) < 2:
-                logger.debug("Image appears to be solid color (placeholder)")
+            # More lenient color check
+            unique_colors = len(set(colors))
+
+            # More lenient validation - accept if it's a reasonable size or has color variation
+            if unique_colors < 2 and (width * height < 5000):  # Only reject very small solid-color images
+                logger.debug("Very small solid-color image detected (likely placeholder)")
                 return False
 
-            return True
+            # Additional check for very small images regardless of color
+            if width < 100 and height < 100 and len(image_data) < 2000:
+                logger.debug(f"Rejecting very small image: {width}x{height}, {len(image_data)} bytes")
+                return False
 
         except Exception as e:
             logger.debug(f"Image validation failed: {str(e)}")
@@ -973,15 +1058,6 @@ class Booksamillion:
                 result["url"] = stock_data['pidinfo'].get('td_url', '')
                 result["image"] = stock_data['pidinfo'].get('image_url', '')
 
-                # Try to save the image locally if it's not already cached
-                if result["image"] and not self.products.get(pid, {}).get("local_image"):
-                    local_image = self.save_image_locally(pid, result["image"])
-                    if local_image:
-                        result["local_image"] = local_image
-                elif pid in self.products and self.products[pid].get("local_image"):
-                    # Use existing cached local image
-                    result["local_image"] = self.products[pid].get("local_image")
-
                 logger.info(f"Found product: {result['title']}")
 
             # Check store availability
@@ -1104,7 +1180,7 @@ class Booksamillion:
 
         # Check if we need to save the image locally
         if result.get("image") and not previous_product.get("local_image"):
-            local_image = self.save_image_locally(pid, result["image"])
+            local_image = self.save_image_locally(pid, result.get("image", ""), result)
             if local_image:
                 result["local_image"] = local_image
         elif previous_product.get("local_image"):
@@ -1218,9 +1294,13 @@ class Booksamillion:
 
                     # Try to save the image locally if available
                     if product.get("image"):
-                        local_image = self.save_image_locally(pid, product["image"])
-                        if local_image:
-                            product["local_image"] = local_image
+                        try:
+                            local_image = self.save_image_locally(pid, product["image"], product)
+                            if local_image:
+                                product["local_image"] = local_image
+                        except Exception as e:
+                            logger.error(f"Error saving image for {pid}: {str(e)}")
+                            product["local_image"] = self._get_placeholder_image_path()
 
                     # Add to the products dictionary
                     current_time = datetime.datetime.now().isoformat()
@@ -1318,9 +1398,41 @@ class Booksamillion:
                 price_match = re.search(r'<span class="our-price">\s*\$([\d\.]+)', block)
                 price = price_match.group(1) if price_match else ""
 
-                # Extract image
-                image_match = re.search(r'<img src="([^"]+)"', block)
-                image = image_match.group(1) if image_match else ""
+                # Extract image - try multiple patterns to get the real image URL
+                image = ""
+
+                # First try to find data-src attribute (lazy loading)
+                image_match = re.search(r'<img[^>]*data-src="([^"]+)"', block)
+                if image_match:
+                    image = image_match.group(1)
+                else:
+                    # Try data-original attribute
+                    image_match = re.search(r'<img[^>]*data-original="([^"]+)"', block)
+                    if image_match:
+                        image = image_match.group(1)
+                    else:
+                        # Fall back to regular src attribute
+                        image_match = re.search(r'<img[^>]*src="([^"]+)"', block)
+                        if image_match:
+                            image = image_match.group(1)
+
+                # If we got a data URL placeholder, try to construct the real URL from the PID
+                if image and image.startswith('data:image'):
+                    # Construct the proper image URL from the PID
+                    if pid.startswith('F0'):
+                        # Format: https://covers.booksamillion.com/covers/gift/0/82/065/085/0820650856006-1.jpg
+                        pid_clean = pid[1:]  # Remove the 'F'
+                        formatted_pid = f"{pid_clean[:3]}/{pid_clean[3:5]}/{pid_clean[5:8]}/{pid_clean[8:11]}/{pid_clean}-1.jpg"
+                        constructed_url = f"https://covers.booksamillion.com/covers/gift/0/{formatted_pid}"
+                        logger.debug(f"Constructed image URL for {pid}: {constructed_url}")
+                        image = constructed_url
+                    elif pid.startswith('F8'):
+                        # Format: https://covers.booksamillion.com/covers/gift/8/20/650/859/820650859328-1.jpg
+                        pid_clean = pid[1:]  # Remove the 'F'
+                        formatted_pid = f"{pid_clean[:1]}/{pid_clean[1:3]}/{pid_clean[3:6]}/{pid_clean[6:9]}/{pid_clean}-1.jpg"
+                        constructed_url = f"https://covers.booksamillion.com/covers/gift/{formatted_pid}"
+                        logger.debug(f"Constructed image URL for {pid}: {constructed_url}")
+                        image = constructed_url
 
                 # Make image URL absolute
                 if image:
@@ -1460,21 +1572,21 @@ class Booksamillion:
             })
         elif event_type == "oos":
         # Only show stock change if there was actually previous stock
-        if prev_stock_qty is not None and prev_stock_qty > 0:
-            stock_change = f"{prev_stock_qty} → 0"
+            if prev_stock_qty is not None and prev_stock_qty > 0:
+                stock_change = f"{prev_stock_qty} → 0"
+                fields.append({
+                    "name": "**Stock**:",
+                    "value": stock_change
+                })
+            else:
+                fields.append({
+                    "name": "**Stock**:",
+                    "value": "0"
+                })
             fields.append({
-                "name": "**Stock**:",
-                "value": stock_change
+                "name": "🔴 **Item Removed**",
+                "value": timestamp
             })
-        else:
-            fields.append({
-                "name": "**Stock**:",
-                "value": "0"
-            })
-        fields.append({
-            "name": "🔴 **Item Removed**",
-            "value": timestamp
-        })
 
         # Store address field is common to all event types
         fields.append({
@@ -1576,9 +1688,9 @@ class Booksamillion:
                 embed = self.build_embed(product, store, event_type)
                 embeds.append(embed)
         else:
-        # Don't create notifications for products with no store information
-        logger.debug(f"No stores found for product {product.get('pid')}, skipping notification")
-        pass
+            # Don't create notifications for products with no store information
+            logger.debug(f"No stores found for product {product.get('pid')}, skipping notification")
+            pass
 
         return {
             "username": "1Tap Monitors",
